@@ -10,7 +10,7 @@ spec:
   project: default
 
   source:
-    repoURL: https://github.com/ThanujaRatakonda/kp_7
+    repoURL: https://github.com/ThanujaRatakonda/kp_9
     targetRevision: master
     path: frontend-hc
     helm:
