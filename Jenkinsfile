@@ -111,6 +111,7 @@ pipeline {
                 sh """
                     git tag ${RELEASE}
                     git push origin ${RELEASE}
+                    git push https://${GIT_USER}:${GIT_PASS}@github.com/ThanujaRatakonda/kp_9.git ${RELEASE}
                 """
             }
         }
