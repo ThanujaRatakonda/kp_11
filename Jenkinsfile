@@ -6,10 +6,16 @@ pipeline {
         HARBOR_URL = "10.131.103.92:8090"
         HARBOR_PROJECT = "kp_9"
         TRIVY_OUTPUT_JSON = "trivy-output.json"
-        K8S_NAMESPACE = "dev"
+        ARGOCD_SERVER = "10.131.103.92:8080"
+        ARGOCD_TOKEN = credentials('argocd-token')
     }
 
     parameters {
+        choice(
+            name: 'ENV',
+            choices: ['dev', 'qa', 'prod'],
+            description: 'Select the target environment for deployment'
+        )
         choice(
             name: 'ACTION',
             choices: ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'],
@@ -19,29 +25,23 @@ pipeline {
 
     stages {
         stage('Checkout') {
-            when { expression { params.ACTION != 'SCALE_ONLY' } }
-            steps {
-                git 'https://github.com/ThanujaRatakonda/kp_9.git'
-            }
+            steps { git 'https://github.com/ThanujaRatakonda/kp_9.git' }
         }
 
-        // ---------------- FRONTEND ----------------
-        stage('Build Frontend') {
+        // Build & Scan Frontend
+        stage('Build & Scan Frontend') {
             when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY'] } }
             steps {
                 sh "docker build -t frontend:${IMAGE_TAG} ./frontend"
-            }
-        }
 
-        stage('Scan Frontend') {
-            when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY'] } }
-            steps {
                 sh """
                     trivy image frontend:${IMAGE_TAG} \
                     --severity CRITICAL,HIGH \
                     --format json -o ${TRIVY_OUTPUT_JSON}
                 """
+
                 archiveArtifacts artifacts: "${TRIVY_OUTPUT_JSON}", fingerprint: true
+
                 script {
                     def vulnerabilities = sh(script: """
                         jq '[.Results[] |
@@ -49,6 +49,7 @@ pipeline {
                              (.Vulnerabilities // [] | .[]? | select(.Severity=="CRITICAL" or .Severity=="HIGH"))
                             ] | length' ${TRIVY_OUTPUT_JSON}
                     """, returnStdout: true).trim()
+
                     if (vulnerabilities.toInteger() > 0) {
                         error "CRITICAL/HIGH vulnerabilities found in frontend!"
                     }
@@ -71,23 +72,20 @@ pipeline {
             }
         }
 
-        // ---------------- BACKEND ----------------
-        stage('Build Backend') {
+        // Build & Scan Backend
+        stage('Build & Scan Backend') {
             when { expression { params.ACTION in ['FULL_PIPELINE', 'BACKEND_ONLY'] } }
             steps {
                 sh "docker build -t backend:${IMAGE_TAG} ./backend"
-            }
-        }
 
-        stage('Scan Backend') {
-            when { expression { params.ACTION in ['FULL_PIPELINE', 'BACKEND_ONLY'] } }
-            steps {
                 sh """
                     trivy image backend:${IMAGE_TAG} \
                     --severity CRITICAL,HIGH \
                     --format json -o ${TRIVY_OUTPUT_JSON}
                 """
+
                 archiveArtifacts artifacts: "${TRIVY_OUTPUT_JSON}", fingerprint: true
+
                 script {
                     def vulnerabilities = sh(script: """
                         jq '[.Results[] |
@@ -95,6 +93,7 @@ pipeline {
                              (.Vulnerabilities // [] | .[]? | select(.Severity=="CRITICAL" or .Severity=="HIGH"))
                             ] | length' ${TRIVY_OUTPUT_JSON}
                     """, returnStdout: true).trim()
+
                     if (vulnerabilities.toInteger() > 0) {
                         error "CRITICAL/HIGH vulnerabilities found in backend!"
                     }
@@ -117,19 +116,19 @@ pipeline {
             }
         }
 
-        // ---------------- Deploy to Kubernetes ----------------
+        // Apply Kubernetes manifests to selected environment
         stage('Deploy to Kubernetes') {
             steps {
-                sh "kubectl apply -f k8s/ -n ${K8S_NAMESPACE}"
+                sh "kubectl apply -f k8s/ -n ${params.ENV}"
             }
         }
 
+        // Trigger ArgoCD sync for selected environment
         stage('Trigger ArgoCD Sync') {
             steps {
-                // Trigger ArgoCD sync using CLI
                 sh """
-                argocd app sync frontend --server https://argocd.example.com --auth-token \$ARGOCD_TOKEN || true
-                argocd app sync backend --server https://argocd.example.com --auth-token \$ARGOCD_TOKEN || true
+                    argocd app sync frontend --grpc-web --server ${ARGOCD_SERVER} --auth-token ${ARGOCD_TOKEN}
+                    argocd app sync backend --grpc-web --server ${ARGOCD_SERVER} --auth-token ${ARGOCD_TOKEN}
                 """
             }
         }
