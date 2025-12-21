@@ -165,15 +165,22 @@ pipeline {
 
         // --- ARGOCD ---
         stage('Apply ArgoCD Applications') {
-            when { expression { params.ACTION == 'FULL_PIPELINE' } }
-            steps {
+    when { expression { params.ACTION == 'FULL_PIPELINE' } }
+    steps {
+        script {
+            if (fileExists('argocd')) {
                 sh """
                     for f in argocd/*.yaml; do
-                        sed 's/\\\${ENV}/${ENV}/g' \$f | kubectl apply -f -
+                        [ -f "\$f" ] && sed 's/\\\${ENV}/${ENV}/g' \$f | kubectl apply -f -
                     done
                 """
+            } else {
+                echo "argocd folder not found, skipping ArgoCD deployment."
             }
         }
+    }
+}
+
 
         stage('Sync ArgoCD Apps') {
             when { expression { params.ACTION == 'FULL_PIPELINE' } }
