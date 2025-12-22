@@ -1,4 +1,3 @@
-
 pipeline {
   agent any
 
@@ -30,7 +29,6 @@ pipeline {
   }
 
   stages {
-
     stage('Checkout') {
       steps {
         git credentialsId: 'git-creds', url: "${GIT_REPO}", branch: 'master'
@@ -266,4 +264,3 @@ pipeline {
     }
   }
 }
-``
