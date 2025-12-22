@@ -38,11 +38,11 @@ pipeline {
 
     stage('Create Namespace') {
       steps {
-        sh '''
-          set -e
-          kubectl get namespace ${params.ENV} >/dev/null 2>&1 || kubectl create namespace ${params.ENV}
+        script {
+          // Replace Groovy interpolation with string concatenation to avoid conflict
+          sh 'kubectl get namespace ' + params.ENV + ' >/dev/null 2>&1 || kubectl create namespace ' + params.ENV
           echo "Namespace ${params.ENV} is ready."
-        '''
+        }
       }
     }
 
@@ -56,17 +56,17 @@ pipeline {
             echo "RESET_STORAGE=true: cleaning PV/PVC for ENV=${params.ENV}"
 
             # Scale down apps that might hold the PVC (ignore errors)
-            kubectl scale deploy backend-backend-hc -n \${params.ENV} --replicas=0 || true
-            kubectl scale sts database-database-hc -n \${params.ENV} --replicas=0 || true
-            kubectl get pods -n \${params.ENV} || true
+            kubectl scale deploy backend-backend-hc -n ${params.ENV} --replicas=0 || true
+            kubectl scale sts database-database-hc -n ${params.ENV} --replicas=0 || true
+            kubectl get pods -n ${params.ENV} || true
 
             # Remove PVC finalizers if stuck
-            kubectl patch pvc shared-pvc -n \${params.ENV} -p '{"metadata":{"finalizers":[]}}' || true
-            kubectl delete pvc shared-pvc -n \${params.ENV} --force --grace-period=0 || true
+            kubectl patch pvc shared-pvc -n ${params.ENV} -p '{"metadata":{"finalizers":[]}}' || true
+            kubectl delete pvc shared-pvc -n ${params.ENV} --force --grace-period=0 || true
 
             # Remove PV finalizers if stuck
-            kubectl patch pv \${PV_NAME} -p '{"metadata":{"finalizers":[]}}' || true
-            kubectl delete pv \${PV_NAME} --force --grace-period=0 || true
+            kubectl patch pv ${PV_NAME} -p '{"metadata":{"finalizers":[]}}' || true
+            kubectl delete pv ${PV_NAME} --force --grace-period=0 || true
           """
         }
       }
@@ -88,31 +88,31 @@ pipeline {
             kubectl get storageclass shared-storage
 
             # 2) PV is cluster-scoped — always apply (idempotent)
-            echo "Applying PV: \${PV_NAME}"
-            kubectl apply -f \${PV_FILE}
-            kubectl get pv \${PV_NAME}
+            echo "Applying PV: ${PV_NAME}"
+            kubectl apply -f ${PV_FILE}
+            kubectl get pv ${PV_NAME}
 
             # 3) PVC — YAML contains metadata.namespace, do NOT use -n for apply
-            echo "Applying PVC: shared-pvc (namespace=\${params.ENV})"
-            kubectl apply -f \${PVC_FILE}
-            kubectl get pvc shared-pvc -n \${params.ENV}
+            echo "Applying PVC: shared-pvc (namespace=${params.ENV})"
+            kubectl apply -f ${PVC_FILE}
+            kubectl get pvc shared-pvc -n ${params.ENV}
 
             # 4) Wait until PVC is Bound
             echo "Waiting for PVC shared-pvc to become Bound..."
             for i in {1..24}; do
-              PHASE=$(kubectl get pvc shared-pvc -n \${params.ENV} -o jsonpath='{.status.phase}' || echo "")
-              if [ "\$PHASE" = "Bound" ]; then
+              PHASE=$(kubectl get pvc shared-pvc -n ${params.ENV} -o jsonpath='{.status.phase}' || echo "")
+              if [ "$PHASE" = "Bound" ]; then
                 echo "PVC is Bound ✅"
                 break
               fi
-              echo "PVC phase: \$PHASE (attempt \$i/24)"
+              echo "PVC phase: $PHASE (attempt $i/24)"
               sleep 5
             done
 
             echo "PVC status:"
-            kubectl describe pvc shared-pvc -n \${params.ENV} | sed -n '1,120p'
+            kubectl describe pvc shared-pvc -n ${params.ENV} | sed -n '1,120p'
             echo "PV status:"
-            kubectl describe pv \${PV_NAME} | sed -n '1,80p'
+            kubectl describe pv ${PV_NAME} | sed -n '1,80p'
           """
         }
       }
@@ -122,11 +122,11 @@ pipeline {
       steps {
         sh """
           set -e
-          kubectl get secret regcred -n \${params.ENV} >/dev/null 2>&1 || kubectl create secret docker-registry regcred -n \${params.ENV} \
+          kubectl get secret regcred -n ${params.ENV} >/dev/null 2>&1 || kubectl create secret docker-registry regcred -n ${params.ENV} \
             --docker-server=${REGISTRY} \
             --docker-username=${DOCKER_USERNAME} \
             --docker-password=${DOCKER_PASSWORD}
-          kubectl get secret regcred -n \${params.ENV}
+          kubectl get secret regcred -n ${params.ENV}
         """
       }
     }
