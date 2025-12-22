@@ -18,8 +18,8 @@ pipeline {
     )
     choice(
       name: 'ENV',
-      choices: ['dev'],  // Only dev environment now
-      description: 'Choose the environment to deploy (dev)'
+      choices: ['dev', 'qa'],  // Environment options
+      description: 'Choose the environment to deploy (dev/qa)'
     )
   }
 
@@ -36,6 +36,7 @@ pipeline {
     stage('Create Namespaces if not exist') {
       steps {
         script {
+          // Create namespace based on ENV parameter (e.g., dev, qa)
           sh """
             kubectl get namespace ${params.ENV} || kubectl create namespace ${params.ENV}
           """
@@ -53,7 +54,7 @@ pipeline {
             kubectl get secret regcred -n ${params.ENV} || kubectl create secret docker-registry regcred -n ${params.ENV} \
               --docker-server=${REGISTRY} \
               --docker-username=${DOCKER_USERNAME} \
-              --docker-password=${DOCKER_PASSWORD} 
+              --docker-password=${DOCKER_PASSWORD}
           """
         }
       }
