@@ -14,7 +14,6 @@ pipeline {
       choices: ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY', 'ARGOCD_ONLY'],
       description: 'Run full pipeline, only frontend/backend, or just apply ArgoCD resources'
     )
-    // Define the environment parameter for selecting the namespace dynamically
     choice(
       name: 'ENV',
       choices: ['dev', 'qa', 'staging', 'prod'],
@@ -131,7 +130,7 @@ pipeline {
     /* =========================
        APPLY K8S AND ARGOCD RESOURCES TOGETHER
        ========================= */
-      stage('Apply Kubernetes & ArgoCD Resources') {
+    stage('Apply Kubernetes & ArgoCD Resources') {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'ARGOCD_ONLY'] } }
       steps {
         script {
@@ -141,9 +140,9 @@ pipeline {
           sh """
             export ENV=${params.ENV}
 
-            # Apply the namespace with proper substitution
+            # Apply the namespace with proper substitution (using envsubst)
             envsubst < k8s/namespace.yaml > k8s/namespace_tmp.yaml
-            kubectl apply -f k8s/namespace_tmp.yaml
+            kubectl apply -f k8s/namespace_tmp.yaml --namespace=${params.ENV}
 
             # Substituting ENV directly in shared-pvc.yaml
             envsubst < k8s/shared-pvc.yaml > k8s/shared-pvc_tmp.yaml
@@ -168,6 +167,13 @@ pipeline {
           """
         }
       }
+    }
+
+  }
+
+  post {
+    success {
+      echo "Argo CD will deploy automatically."
     }
   }
 }
