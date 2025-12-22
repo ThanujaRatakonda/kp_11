@@ -142,6 +142,7 @@ stage('Apply Kubernetes & ArgoCD Resources') {
       """
       sh """
         sed -i 's/namespace: {{ .Values.targetNamespace | default "dev" }}/namespace: ${params.ENV}/g' argocd/*.yaml
+        sed -i 's/namespace: argocd/namespace: ${params.ENV}/g' argocd/*.yaml
         kubectl apply -f argocd/ -n ${params.ENV}
       """
     }
