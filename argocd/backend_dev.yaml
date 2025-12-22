@@ -5,10 +5,8 @@ metadata:
   namespace: argocd
   annotations:
     argocd.argoproj.io/sync-options: CreateNamespace=true
-
 spec:
   project: default
-
   source:
     repoURL: https://github.com/ThanujaRatakonda/kp_10
     targetRevision: master
@@ -16,11 +14,9 @@ spec:
     helm:
       valueFiles:
         - backendvalues_dev.yaml
-
   destination:
     server: https://kubernetes.default.svc
     namespace: dev
-
   syncPolicy:
     automated:
       prune: true
