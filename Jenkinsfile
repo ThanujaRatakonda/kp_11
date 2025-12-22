@@ -2,7 +2,6 @@ pipeline {
   agent any
 
   environment {
-    ENV = "dev"  // Make sure ENV is set to a valid namespace
     REGISTRY = "10.131.103.92:8090"
     PROJECT  = "kp_9"
     IMAGE_TAG = "${BUILD_NUMBER}"
@@ -14,6 +13,12 @@ pipeline {
       name: 'ACTION',
       choices: ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'],
       description: 'Run full pipeline or only frontend/backend'
+    )
+    // Define the environment parameter for selecting the namespace dynamically
+    choice(
+      name: 'ENV',
+      choices: ['dev', 'qa', 'staging', 'prod'],
+      description: 'Select the target environment (namespace)'
     )
   }
 
@@ -130,11 +135,14 @@ pipeline {
     stage('Apply Kubernetes & ArgoCD Resources') {
       steps {
         script {
-          // Use envsubst to replace ${ENV} in k8s/namespace.yaml before applying
+          // Debug: Print the ENV value to ensure it's correct
+          echo "Applying resources for namespace: ${params.ENV}"
+          
+          // Use envsubst to create a temporary file with the correct namespace
           sh """
-            # Replace ${ENV} in the namespace YAML file and apply the changes
-            envsubst < k8s/namespace.yaml | kubectl apply -f - -n ${ENV}
-            kubectl apply -f k8s/ -n ${ENV}
+            envsubst < k8s/namespace.yaml > k8s/namespace_tmp.yaml
+            kubectl apply -f k8s/namespace_tmp.yaml -n ${params.ENV}
+            kubectl apply -f k8s/ -n ${params.ENV}
             kubectl apply -f argocd/ -n argocd
           """
         }
