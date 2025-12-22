@@ -14,7 +14,7 @@ pipeline {
     choice(
       name: 'ACTION',
       choices: ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY', 'DATABASE_ONLY', 'ARGOCD_ONLY'],
-      description: 'Run full pipeline or specific components'
+      description: 'Run full pipeline, only frontend/backend/database, or just apply ArgoCD resources'
     )
     choice(
       name: 'ENV',
@@ -24,7 +24,7 @@ pipeline {
     booleanParam(
       name: 'RESET_STORAGE',
       defaultValue: false,
-      description: 'Delete PV/PVC for this ENV before re-applying'
+      description: 'If true, delete PV/PVC for this ENV before re-applying'
     )
   }
 
@@ -58,14 +58,16 @@ pipeline {
             set -e
             echo "RESET_STORAGE=true: cleaning PV/PVC for ENV=${ENV_NS}"
 
-            # Scale down apps
+            # Scale down ALL apps including database
             kubectl scale deploy backend-backend-hc -n ${ENV_NS} --replicas=0 || true
             kubectl scale deploy frontend-frontend-hc -n ${ENV_NS} --replicas=0 || true
             kubectl scale sts database-database-hc -n ${ENV_NS} --replicas=0 || true
 
-            # Clean PVC/PV
+            # Remove PVC finalizers
             kubectl patch pvc shared-pvc -n ${ENV_NS} -p '{\"metadata\":{\"finalizers\":[]}}' || true
             kubectl delete pvc shared-pvc -n ${ENV_NS} --force --grace-period=0 || true
+
+            # Remove PV finalizers
             kubectl patch pv ${PV_NAME} -p '{\"metadata\":{\"finalizers\":[]}}' || true
             kubectl delete pv ${PV_NAME} --force --grace-period=0 || true
           """
@@ -83,15 +85,30 @@ pipeline {
 
           sh """
             set -e
+
+            # 1) StorageClass (cluster-wide)
             kubectl apply -f k8s/shared-storage-class.yaml || true
-            test -f ${PV_FILE} && kubectl apply -f ${PV_FILE}
-            test -f ${PVC_FILE} && kubectl apply -f ${PVC_FILE}
-            
-            # Wait for PVC
+            kubectl get storageclass shared-storage
+
+            # 2) PV (cluster-scoped)
+            echo "Applying PV: ${PV_NAME} from ${PV_FILE}"
+            test -f ${PV_FILE} && kubectl apply -f ${PV_FILE} || echo "PV file not found"
+            kubectl get pv ${PV_NAME}
+
+            # 3) PVC (namespace-specific)
+            echo "Applying PVC from ${PVC_FILE}"
+            test -f ${PVC_FILE} && kubectl apply -f ${PVC_FILE} || echo "PVC file not found"
+            kubectl get pvc shared-pvc -n ${ENV_NS}
+
+            # 4) Wait for PVC to bind
+            echo "Waiting for PVC shared-pvc to become Bound in ${ENV_NS}..."
             for i in {1..30}; do
               PHASE=\$(kubectl get pvc shared-pvc -n ${ENV_NS} -o jsonpath='{.status.phase}' 2>/dev/null || echo "Pending")
-              [ "\$PHASE" = "Bound" ] && echo "PVC Bound ✅" && break
-              echo "PVC: \$PHASE (attempt \$i)"
+              if [ "\$PHASE" = "Bound" ]; then
+                echo "PVC is Bound ✅"
+                break
+              fi
+              echo "PVC phase: \$PHASE (attempt \$i/30)"
               sleep 5
             done
           """
@@ -106,28 +123,37 @@ pipeline {
           sh """
             kubectl get secret regcred -n ${ENV_NS} >/dev/null 2>&1 || \\
             kubectl create secret docker-registry regcred -n ${ENV_NS} \\
-              --docker-server=${REGISTRY} --docker-username=${DOCKER_USERNAME} --docker-password=${DOCKER_PASSWORD}
+              --docker-server=${REGISTRY} \\
+              --docker-username=${DOCKER_USERNAME} \\
+              --docker-password=${DOCKER_PASSWORD}
+            kubectl get secret regcred -n ${ENV_NS}
           """
         }
       }
     }
 
+    // DATABASE DEPLOYMENT - NEW STAGE
     stage('Deploy Database') {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'DATABASE_ONLY'] } }
       steps {
         script {
           def ENV_NS = params.ENV
           sh """
-            echo "Deploying database to ${ENV_NS} using database-hc Helm chart..."
+            set -e
+            echo "Deploying Database to ${ENV_NS} namespace..."
             
-            # Deploy database using your existing Helm chart
-            helm upgrade --install database-database-hc database-hc \\
-              --namespace ${ENV_NS} \\
-              --values database-hc/databasevalues.yaml
+            # Deploy database StatefulSet/Service using Helm or raw manifests
+            # Option 1: If you have database manifests
+            kubectl apply -f k8s/database_${ENV_NS}.yaml || true
             
-            # Wait for readiness
-            kubectl rollout status sts/database-database-hc -n ${ENV_NS} --timeout=300s || true
+            # Option 2: If using Helm (uncomment below)
+            # helm upgrade --install database-database-hc ./database-hc \\
+            #   -n ${ENV_NS} -f database-hc/databasevalues_${ENV_NS}.yaml
             
+            # Wait for database to be ready
+            kubectl rollout status sts/database-database-hc -n ${ENV_NS} --timeout=300s
+            
+            echo "Database deployed successfully in ${ENV_NS}"
             kubectl get sts,pvc,svc -n ${ENV_NS} -l app=database
           """
         }
@@ -168,8 +194,12 @@ pipeline {
         script {
           def ENV_NS = params.ENV
           sh """
+            set -e
+            # Frontend values
             sed -i 's|repository:.*|repository: ${REGISTRY}/${PROJECT}/frontend|' frontend-hc/frontendvalues_${ENV_NS}.yaml
             sed -i 's|tag:.*|tag: ${IMAGE_TAG}|' frontend-hc/frontendvalues_${ENV_NS}.yaml
+            
+            # Backend values  
             sed -i 's|repository:.*|repository: ${REGISTRY}/${PROJECT}/backend|' backend-hc/backendvalues_${ENV_NS}.yaml
             sed -i 's|tag:.*|tag: ${IMAGE_TAG}|' backend-hc/backendvalues_${ENV_NS}.yaml
           """
@@ -186,7 +216,7 @@ pipeline {
               git config user.name "Thanuja"
               git config user.email "ratakondathanuja@gmail.com"
               git add frontend-hc/frontendvalues_${ENV_NS}.yaml backend-hc/backendvalues_${ENV_NS}.yaml
-              git commit -m "chore: update images ${IMAGE_TAG} for ${ENV_NS}" || true
+              git commit -m "chore: update images to ${IMAGE_TAG} for ${ENV_NS}" || echo "No changes"
               git push https://\${GIT_USER}:\${GIT_TOKEN}@github.com/ThanujaRatakonda/kp_10.git master
             """
           }
@@ -201,20 +231,27 @@ pipeline {
           def ENV_NS = params.ENV
           sh """
             set -e
-            # Apply your EXISTING files only
+            # Apply ALL ArgoCD apps for this environment (includes database)
             kubectl apply -f argocd/backend_${ENV_NS}.yaml
             kubectl apply -f argocd/frontend_${ENV_NS}.yaml
-            kubectl apply -f argocd/database-app.yaml  # SINGLE database app
+            kubectl apply -f argocd/database_${ENV_NS}.yaml  # NEW: Environment-specific database
             
-            # Refresh ArgoCD apps
+            # Force ArgoCD refresh for ALL apps
             kubectl annotate application frontend -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
             kubectl annotate application backend -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
             kubectl annotate application database -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
-            
+
             kubectl get applications -n argocd
           """
         }
       }
+    }
+  }
+
+  post {
+    always {
+      sh 'docker logout ${REGISTRY} || true'
+      sh 'docker image prune -f || true'
     }
   }
 }
