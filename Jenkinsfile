@@ -31,6 +31,19 @@ pipeline {
     }
 
     /* =========================
+       Create Namespaces if not exist
+       ========================= */
+    stage('Create Namespaces if not exist') {
+      steps {
+        script {
+          sh """
+            kubectl get namespace ${params.ENV} || kubectl create namespace ${params.ENV}
+          """
+        }
+      }
+    }
+
+    /* =========================
        Create Docker Registry Secret if it doesn't exist
        ========================= */
     stage('Create Docker Registry Secret') {
@@ -79,9 +92,7 @@ pipeline {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY'] } }
       steps {
         sh """
-        pwd
-          ls -l frontend-hc
-        sed -i 's/tag:.*/tag: "${IMAGE_TAG}"/' frontend-hc/frontendvalues_${params.ENV}.yaml
+          sed -i 's/tag:.*/tag: "${IMAGE_TAG}"/' frontend-hc/frontendvalues_${params.ENV}.yaml
         """
       }
     }
@@ -135,7 +146,7 @@ pipeline {
           passwordVariable: 'GIT_TOKEN'
         )]) {
           sh """
-            git config user.name "Thanuja"
+            git config user.name "thanuja"
             git config user.email "ratakondathanuja@gmail.com"
             git add frontend-hc/frontendvalues_${params.ENV}.yaml backend-hc/backendvalues_${params.ENV}.yaml
             git commit -m "Update images to tag ${IMAGE_TAG}" || echo "No changes"
