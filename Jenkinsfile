@@ -138,7 +138,7 @@ stage('Apply Kubernetes & ArgoCD Resources') {
         kubectl apply -f k8s/ -n ${params.ENV}
       """
       sh """
-        kubectl apply -f argocd/ -n ${params.ENV}
+        kubectl apply -f argocd/ 
       """
     }
   }
