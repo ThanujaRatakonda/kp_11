@@ -140,8 +140,8 @@ pipeline {
           
           // Use envsubst to create a temporary file with the correct namespace
           sh """
-            envsubst < k8s/namespace.yaml > k8s/namespace.yaml
-            kubectl apply -f k8s/namespace.yaml -n ${params.ENV}
+            envsubst < k8s/namespace.yaml > k8s/namespace_tmp.yaml
+            kubectl apply -f k8s/namespace_tmp.yaml -n ${params.ENV}
             kubectl apply -f k8s/ -n ${params.ENV}
             kubectl apply -f argocd/ -n argocd
           """
