@@ -19,7 +19,7 @@ pipeline {
     )
     choice(
       name: 'ENV',
-      choices: ['dev', 'qa', 'BOTH'],  // 🔥 NEW: Deploy BOTH at once!
+      choices: ['dev', 'qa', 'BOTH'],
       description: 'Choose environment(s): dev/qa/BOTH'
     )
     booleanParam(
@@ -36,27 +36,24 @@ pipeline {
       }
     }
 
-    /* =========================
-       SETUP ENVIRONMENTS (dev/qa/BOTH)
-       ========================= */
     stage('Setup Environments') {
       steps {
         script {
           def envs = params.ENV == 'BOTH' ? ['dev', 'qa'] : [params.ENV]
           for (def ENV_NS : envs) {
             sh """
-              # Create namespace if needed
+              # Create namespace
               kubectl get namespace ${ENV_NS} || kubectl create namespace ${ENV_NS}
               
-              # Create Docker Registry Secret
+              # Docker Registry Secret
               kubectl get secret regcred -n ${ENV_NS} || kubectl create secret docker-registry regcred -n ${ENV_NS} \
                 --docker-server=${REGISTRY} \
                 --docker-username=${DOCKER_USERNAME} \
                 --docker-password=${DOCKER_PASSWORD}
               
-              # Apply storage (PV/PVC)
-              kubectl get pvc shared-pvc -n ${ENV_NS} || kubectl apply -f k8s/shared-pvc_${ENV_NS}.yaml -n ${ENV_NS}
-              kubectl get pv shared-pv-${ENV_NS} || kubectl apply -f k8s/shared-pv_${ENV_NS}.yaml
+              # Storage (PV/PVC) - only if files exist
+              test -f k8s/shared-pvc_${ENV_NS}.yaml && kubectl get pvc shared-pvc -n ${ENV_NS} || kubectl apply -f k8s/shared-pvc_${ENV_NS}.yaml -n ${ENV_NS}
+              test -f k8s/shared-pv_${ENV_NS}.yaml && kubectl get pv shared-pv-${ENV_NS} || kubectl apply -f k8s/shared-pv_${ENV_NS}.yaml
               
               echo "✅ ${ENV_NS} environment ready!"
             """
@@ -87,25 +84,26 @@ pipeline {
       }
       steps {
         sh """
-          trivy image --severity CRITICAL,HIGH --format json -o ${TRIVY_OUTPUT_JSON} frontend:${IMAGE_TAG}
+          trivy image --severity CRITICAL,HIGH --format json -o ${TRIVY_OUTPUT_JSON} frontend:${IMAGE_TAG} \
+          --skip-version-check
         """
         archiveArtifacts artifacts: "${TRIVY_OUTPUT_JSON}", fingerprint: true, allowEmptyArchive: true
         
         script {
-          def props = readJSON file: "${TRIVY_OUTPUT_JSON}"
-          def criticalHighCount = 0
+          def vulnerabilities = sh(
+            script: """
+              jq '[.Results[] | 
+                (.Vulnerabilities // [] | 
+                  map(select(.Severity=="CRITICAL" or .Severity=="HIGH")) 
+                ) 
+              ] | length' ${TRIVY_OUTPUT_JSON}
+            """, 
+            returnStdout: true
+          ).trim()
           
-          props.Results.each { result ->
-            if (result.Vulnerabilities) {
-              criticalHighCount += result.Vulnerabilities.count { 
-                it.Severity in ['CRITICAL', 'HIGH'] 
-              }
-            }
-          }
-          
-          echo "🔍 Frontend: ${criticalHighCount} CRITICAL/HIGH vulnerabilities"
-          if (criticalHighCount > 0) {
-            error "🚨 ${criticalHighCount} CRITICAL/HIGH vulnerabilities in frontend!"
+          echo "🔍 Frontend: ${vulnerabilities} CRITICAL/HIGH vulnerabilities"
+          if (vulnerabilities.toInteger() > 0) {
+            error "🚨 ${vulnerabilities} CRITICAL/HIGH vulnerabilities in frontend!"
           }
           echo "✅ Frontend scan PASSED!"
         }
@@ -125,7 +123,7 @@ pipeline {
             docker tag frontend:${IMAGE_TAG} ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}
             docker push ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}
             docker rmi frontend:${IMAGE_TAG} || true
-            echo "✅ Frontend pushed!"
+            echo "✅ Frontend pushed: ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}"
           """
         }
       }
@@ -153,25 +151,26 @@ pipeline {
       }
       steps {
         sh """
-          trivy image --severity CRITICAL,HIGH --format json -o ${TRIVY_OUTPUT_JSON} backend:${IMAGE_TAG}
+          trivy image --severity CRITICAL,HIGH --format json -o ${TRIVY_OUTPUT_JSON} backend:${IMAGE_TAG} \
+          --skip-version-check
         """
         archiveArtifacts artifacts: "${TRIVY_OUTPUT_JSON}", fingerprint: true, allowEmptyArchive: true
         
         script {
-          def props = readJSON file: "${TRIVY_OUTPUT_JSON}"
-          def criticalHighCount = 0
+          def vulnerabilities = sh(
+            script: """
+              jq '[.Results[] | 
+                (.Vulnerabilities // [] | 
+                  map(select(.Severity=="CRITICAL" or .Severity=="HIGH")) 
+                ) 
+              ] | length' ${TRIVY_OUTPUT_JSON}
+            """, 
+            returnStdout: true
+          ).trim()
           
-          props.Results.each { result ->
-            if (result.Vulnerabilities) {
-              criticalHighCount += result.Vulnerabilities.count { 
-                it.Severity in ['CRITICAL', 'HIGH'] 
-              }
-            }
-          }
-          
-          echo "🔍 Backend: ${criticalHighCount} CRITICAL/HIGH vulnerabilities"
-          if (criticalHighCount > 0) {
-            error "🚨 ${criticalHighCount} CRITICAL/HIGH vulnerabilities in backend!"
+          echo "🔍 Backend: ${vulnerabilities} CRITICAL/HIGH vulnerabilities"
+          if (vulnerabilities.toInteger() > 0) {
+            error "🚨 ${vulnerabilities} CRITICAL/HIGH vulnerabilities in backend!"
           }
           echo "✅ Backend scan PASSED!"
         }
@@ -191,14 +190,14 @@ pipeline {
             docker tag backend:${IMAGE_TAG} ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}
             docker push ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}
             docker rmi backend:${IMAGE_TAG} || true
-            echo "✅ Backend pushed!"
+            echo "✅ Backend pushed: ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}"
           """
         }
       }
     }
 
     /* =========================
-       UPDATE HELM VALUES FOR ALL ENVS
+       UPDATE HELM VALUES (dev/qa/BOTH)
        ========================= */
     stage('Update Helm Values') {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] } }
@@ -207,8 +206,8 @@ pipeline {
           def envs = params.ENV == 'BOTH' ? ['dev', 'qa'] : [params.ENV]
           for (def ENV_NS : envs) {
             sh """
-              sed -i 's|tag:.*|tag: "${IMAGE_TAG}"|' frontend-hc/frontendvalues_${ENV_NS}.yaml
-              sed -i 's|tag:.*|tag: "${IMAGE_TAG}"|' backend-hc/backendvalues_${ENV_NS}.yaml
+              test -f frontend-hc/frontendvalues_${ENV_NS}.yaml && sed -i 's|tag:.*|tag: "${IMAGE_TAG}"|' frontend-hc/frontendvalues_${ENV_NS}.yaml
+              test -f backend-hc/backendvalues_${ENV_NS}.yaml && sed -i 's|tag:.*|tag: "${IMAGE_TAG}"|' backend-hc/backendvalues_${ENV_NS}.yaml
               echo "✅ Updated ${ENV_NS} helm values to tag ${IMAGE_TAG}"
             """
           }
@@ -217,7 +216,7 @@ pipeline {
     }
 
     /* =========================
-       COMMIT FOR ARGO CD (ALL ENVS)
+       COMMIT FOR ARGO CD
        ========================= */
     stage('Commit & Push Helm Changes') {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] } }
@@ -230,7 +229,7 @@ pipeline {
           sh """
             git config user.name "thanuja"
             git config user.email "ratakondathanuja@gmail.com"
-            git add frontend-hc/*.yaml backend-hc/*.yaml
+            git add frontend-hc/*.yaml backend-hc/*.yaml || true
             git commit -m "chore: update images ${IMAGE_TAG} for ${params.ENV}" || echo "No changes"
             git push https://\${GIT_USER}:\${GIT_TOKEN}@github.com/ThanujaRatakonda/kp_9.git master
             echo "✅ Committed changes for ${params.ENV}"
@@ -249,35 +248,43 @@ pipeline {
           def envs = params.ENV == 'BOTH' ? ['dev', 'qa'] : [params.ENV]
           for (def ENV_NS : envs) {
             sh """
-              # Apply ArgoCD apps for this env
+              # Backend app
               kubectl get application backend-${ENV_NS} -n argocd || kubectl apply -f argocd/backend-app_${ENV_NS}.yaml
+              
+              # Frontend app  
               kubectl get application frontend-${ENV_NS} -n argocd || kubectl apply -f argocd/frontend-app_${ENV_NS}.yaml
+              
+              # Database app
               kubectl get application database-${ENV_NS} -n argocd || kubectl apply -f argocd/database-app_${ENV_NS}.yaml
               
-              # Hard refresh ArgoCD
+              # Hard refresh all
               kubectl annotate application backend-${ENV_NS} -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
               kubectl annotate application frontend-${ENV_NS} -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
               kubectl annotate application database-${ENV_NS} -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
               
-              echo "✅ ArgoCD apps applied for ${ENV_NS}"
+              echo "✅ ArgoCD apps refreshed for ${ENV_NS}"
             """
           }
         }
       }
     }
 
-    stage('✅ Verify Deployment') {
+    stage('✅ Verify All Deployments') {
       steps {
         script {
           def envs = params.ENV == 'BOTH' ? ['dev', 'qa'] : [params.ENV]
           for (def ENV_NS : envs) {
             sh """
               echo "=== ${ENV_NS} STATUS ==="
-              kubectl get pods -n ${ENV_NS}
+              kubectl get pods -n ${ENV_NS} -o wide
               kubectl get svc -n ${ENV_NS}
+              kubectl get pvc -n ${ENV_NS}
             """
           }
-          sh "kubectl get applications -n argocd | grep -E '(dev|qa)'"
+          sh """
+            echo "=== ARGOCD APPS ==="
+            kubectl get applications -n argocd | grep -E '(dev|qa|backend|frontend|database)'
+          """
         }
       }
     }
