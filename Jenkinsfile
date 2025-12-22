@@ -25,7 +25,7 @@ pipeline {
     booleanParam(
       name: 'SKIP_SCANNING',
       defaultValue: false,
-      description: 'Skip Trivy vulnerability scanning (for quick testing)'
+      description: 'Skip Trivy vulnerability scanning'
     )
   }
 
@@ -36,7 +36,28 @@ pipeline {
       }
     }
 
-    stage('Setup Environments') {
+    /* =========================
+       YOUR ORIGINAL WORKING SETUP (fixed for BOTH envs)
+       ========================= */
+    stage('Create Docker Registry Secret') {
+      steps {
+        script {
+          def envs = params.ENV == 'BOTH' ? ['dev', 'qa'] : [params.ENV]
+          for (def ENV_NS : envs) {
+            sh """
+              kubectl get secret regcred -n ${ENV_NS} || kubectl create secret docker-registry regcred -n ${ENV_NS} \
+                --docker-server=${REGISTRY} \
+                --docker-username=${DOCKER_USERNAME} \
+                --docker-password=${DOCKER_PASSWORD} 
+              echo "✅ Registry secret for ${ENV_NS}"
+            """
+          }
+        }
+      }
+    }
+
+    stage('Apply Kubernetes Resources') {
+      when { expression { params.ACTION in ['FULL_PIPELINE', 'ARGOCD_ONLY'] } }
       steps {
         script {
           def envs = params.ENV == 'BOTH' ? ['dev', 'qa'] : [params.ENV]
@@ -45,17 +66,11 @@ pipeline {
               # Create namespace
               kubectl get namespace ${ENV_NS} || kubectl create namespace ${ENV_NS}
               
-              # Docker Registry Secret
-              kubectl get secret regcred -n ${ENV_NS} || kubectl create secret docker-registry regcred -n ${ENV_NS} \
-                --docker-server=${REGISTRY} \
-                --docker-username=${DOCKER_USERNAME} \
-                --docker-password=${DOCKER_PASSWORD}
+              # YOUR ORIGINAL STORAGE FILES
+              kubectl get pvc shared-pvc -n ${ENV_NS} || kubectl apply -f k8s/shared-pvc.yaml -n ${ENV_NS}
+              kubectl get pv shared-pv || kubectl apply -f k8s/shared-pv.yaml
               
-              # Storage (PV/PVC) - only if files exist
-              test -f k8s/shared-pvc_${ENV_NS}.yaml && kubectl get pvc shared-pvc -n ${ENV_NS} || kubectl apply -f k8s/shared-pvc_${ENV_NS}.yaml -n ${ENV_NS}
-              test -f k8s/shared-pv_${ENV_NS}.yaml && kubectl get pv shared-pv-${ENV_NS} || kubectl apply -f k8s/shared-pv_${ENV_NS}.yaml
-              
-              echo "✅ ${ENV_NS} environment ready!"
+              echo "✅ Storage ready for ${ENV_NS}"
             """
           }
         }
@@ -63,14 +78,14 @@ pipeline {
     }
 
     /* =========================
-       FRONTEND: Build → Trivy → Push
+       FRONTEND (Build → Trivy → Push)
        ========================= */
     stage('Build Frontend Image') {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY'] } }
       steps {
         sh """
           docker build -t frontend:${IMAGE_TAG} ./frontend
-          echo "✅ Frontend built: frontend:${IMAGE_TAG}"
+          echo "✅ Frontend built"
         """
       }
     }
@@ -101,11 +116,11 @@ pipeline {
             returnStdout: true
           ).trim()
           
-          echo "🔍 Frontend: ${vulnerabilities} CRITICAL/HIGH vulnerabilities"
+          echo "🔍 Frontend: ${vulnerabilities} CRITICAL/HIGH vulns"
           if (vulnerabilities.toInteger() > 0) {
-            error "🚨 ${vulnerabilities} CRITICAL/HIGH vulnerabilities in frontend!"
+            error "🚨 ${vulnerabilities} CRITICAL/HIGH vulns in frontend!"
           }
-          echo "✅ Frontend scan PASSED!"
+          echo "✅ Frontend PASSED!"
         }
       }
     }
@@ -123,21 +138,37 @@ pipeline {
             docker tag frontend:${IMAGE_TAG} ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}
             docker push ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}
             docker rmi frontend:${IMAGE_TAG} || true
-            echo "✅ Frontend pushed: ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}"
           """
         }
       }
     }
 
+    stage('Update Frontend Helm Values') {
+      when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY'] } }
+      steps {
+        script {
+          def envs = params.ENV == 'BOTH' ? ['dev', 'qa'] : [params.ENV]
+          for (def ENV_NS : envs) {
+            sh """
+              test -f frontend-hc/frontendvalues_${ENV_NS}.yaml && \\
+              sed -i 's/tag:.*/tag: "${IMAGE_TAG}"/' frontend-hc/frontendvalues_${ENV_NS}.yaml || \\
+              sed -i 's/tag:.*/tag: "${IMAGE_TAG}"/' frontend-hc/frontendvalues.yaml
+              echo "✅ Frontend values updated for ${ENV_NS}"
+            """
+          }
+        }
+      }
+    }
+
     /* =========================
-       BACKEND: Build → Trivy → Push
+       BACKEND (Build → Trivy → Push)
        ========================= */
     stage('Build Backend Image') {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'BACKEND_ONLY'] } }
       steps {
         sh """
           docker build -t backend:${IMAGE_TAG} ./backend
-          echo "✅ Backend built: backend:${IMAGE_TAG}"
+          echo "✅ Backend built"
         """
       }
     }
@@ -168,11 +199,11 @@ pipeline {
             returnStdout: true
           ).trim()
           
-          echo "🔍 Backend: ${vulnerabilities} CRITICAL/HIGH vulnerabilities"
+          echo "🔍 Backend: ${vulnerabilities} CRITICAL/HIGH vulns"
           if (vulnerabilities.toInteger() > 0) {
-            error "🚨 ${vulnerabilities} CRITICAL/HIGH vulnerabilities in backend!"
+            error "🚨 ${vulnerabilities} CRITICAL/HIGH vulns in backend!"
           }
-          echo "✅ Backend scan PASSED!"
+          echo "✅ Backend PASSED!"
         }
       }
     }
@@ -190,25 +221,22 @@ pipeline {
             docker tag backend:${IMAGE_TAG} ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}
             docker push ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}
             docker rmi backend:${IMAGE_TAG} || true
-            echo "✅ Backend pushed: ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}"
           """
         }
       }
     }
 
-    /* =========================
-       UPDATE HELM VALUES (dev/qa/BOTH)
-       ========================= */
-    stage('Update Helm Values') {
-      when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] } }
+    stage('Update Backend Helm Values') {
+      when { expression { params.ACTION in ['FULL_PIPELINE', 'BACKEND_ONLY'] } }
       steps {
         script {
           def envs = params.ENV == 'BOTH' ? ['dev', 'qa'] : [params.ENV]
           for (def ENV_NS : envs) {
             sh """
-              test -f frontend-hc/frontendvalues_${ENV_NS}.yaml && sed -i 's|tag:.*|tag: "${IMAGE_TAG}"|' frontend-hc/frontendvalues_${ENV_NS}.yaml
-              test -f backend-hc/backendvalues_${ENV_NS}.yaml && sed -i 's|tag:.*|tag: "${IMAGE_TAG}"|' backend-hc/backendvalues_${ENV_NS}.yaml
-              echo "✅ Updated ${ENV_NS} helm values to tag ${IMAGE_TAG}"
+              test -f backend-hc/backendvalues_${ENV_NS}.yaml && \\
+              sed -i 's/tag:.*/tag: "${IMAGE_TAG}"/' backend-hc/backendvalues_${ENV_NS}.yaml || \\
+              sed -i 's/tag:.*/tag: "${IMAGE_TAG}"/' backend-hc/backendvalues.yaml
+              echo "✅ Backend values updated for ${ENV_NS}"
             """
           }
         }
@@ -216,7 +244,7 @@ pipeline {
     }
 
     /* =========================
-       COMMIT FOR ARGO CD
+       COMMIT & ARGO CD
        ========================= */
     stage('Commit & Push Helm Changes') {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] } }
@@ -229,62 +257,46 @@ pipeline {
           sh """
             git config user.name "thanuja"
             git config user.email "ratakondathanuja@gmail.com"
-            git add frontend-hc/*.yaml backend-hc/*.yaml || true
-            git commit -m "chore: update images ${IMAGE_TAG} for ${params.ENV}" || echo "No changes"
+            git add frontend-hc/*.yaml backend-hc/*.yaml
+            git commit -m "Update images to tag ${IMAGE_TAG} for ${params.ENV}" || echo "No changes"
             git push https://\${GIT_USER}:\${GIT_TOKEN}@github.com/ThanujaRatakonda/kp_9.git master
-            echo "✅ Committed changes for ${params.ENV}"
           """
         }
       }
     }
 
-    /* =========================
-       APPLY ARGOCD APPS (dev/qa/BOTH)
-       ========================= */
-    stage('Apply ArgoCD Apps') {
+    stage('Apply ArgoCD Resources') {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'ARGOCD_ONLY'] } }
       steps {
         script {
           def envs = params.ENV == 'BOTH' ? ['dev', 'qa'] : [params.ENV]
           for (def ENV_NS : envs) {
             sh """
-              # Backend app
-              kubectl get application backend-${ENV_NS} -n argocd || kubectl apply -f argocd/backend-app_${ENV_NS}.yaml
+              kubectl get application backend -n argocd || kubectl apply -f argocd/backend-app.yaml
+              kubectl get application frontend -n argocd || kubectl apply -f argocd/frontend-app.yaml
+              kubectl get application database -n argocd || kubectl apply -f argocd/database-app.yaml
               
-              # Frontend app  
-              kubectl get application frontend-${ENV_NS} -n argocd || kubectl apply -f argocd/frontend-app_${ENV_NS}.yaml
-              
-              # Database app
-              kubectl get application database-${ENV_NS} -n argocd || kubectl apply -f argocd/database-app_${ENV_NS}.yaml
-              
-              # Hard refresh all
-              kubectl annotate application backend-${ENV_NS} -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
-              kubectl annotate application frontend-${ENV_NS} -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
-              kubectl annotate application database-${ENV_NS} -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
-              
-              echo "✅ ArgoCD apps refreshed for ${ENV_NS}"
+              # Hard refresh
+              kubectl annotate application backend -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
+              kubectl annotate application frontend -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
+              kubectl annotate application database -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
             """
           }
         }
       }
     }
 
-    stage('✅ Verify All Deployments') {
+    stage('✅ Verify') {
       steps {
         script {
           def envs = params.ENV == 'BOTH' ? ['dev', 'qa'] : [params.ENV]
           for (def ENV_NS : envs) {
             sh """
-              echo "=== ${ENV_NS} STATUS ==="
-              kubectl get pods -n ${ENV_NS} -o wide
+              echo "=== ${ENV_NS} ==="
+              kubectl get pods -n ${ENV_NS}
               kubectl get svc -n ${ENV_NS}
-              kubectl get pvc -n ${ENV_NS}
             """
           }
-          sh """
-            echo "=== ARGOCD APPS ==="
-            kubectl get applications -n argocd | grep -E '(dev|qa|backend|frontend|database)'
-          """
         }
       }
     }
