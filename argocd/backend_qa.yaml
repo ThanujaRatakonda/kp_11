@@ -15,7 +15,7 @@ spec:
     path: backend-hc
     helm:
       valueFiles:
-        - backendvalues.yaml
+        - backendvalues_qa.yaml
 
   destination:
     server: https://kubernetes.default.svc
