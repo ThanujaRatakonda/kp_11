@@ -107,8 +107,8 @@ pipeline {
     stage('Commit & Push Helm Changes') {
       steps {
         sh """
-          git config user.name "thanu"
-          git config user.email "thanuja@gmail.com"
+          git config user.name "thanuja"
+          git config user.email ratakondathanuja@gmail.com"
           git add frontend-hc/frontendvalues.yaml backend-hc/backendvalues.yaml
           git commit -m "Update images to tag ${IMAGE_TAG}" || echo "No changes"
           git push origin master
