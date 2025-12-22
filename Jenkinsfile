@@ -2,83 +2,102 @@ pipeline {
     agent any
 
     environment {
-        IMAGE_TAG = "${BUILD_NUMBER}"
+        IMAGE_TAG = "${env.BUILD_NUMBER}"
         HARBOR_URL = "10.131.103.92:8090"
-        HARBOR_PROJECT = "kp_7"
-    }
-
-    parameters {
-        choice(
-            name: 'SERVICE',
-            choices: ['all', 'frontend', 'backend'],
-            description: 'Which service to build'
-        )
-        choice(
-            name: 'NAMESPACE',
-            choices: ['dev', 'qa'],
-            description: 'Target Kubernetes namespace'
-        )
+        HARBOR_PROJECT = "kp_6"
+        TRIVY_OUTPUT_JSON = "trivy-output.json"
+        ENV = "dev"
     }
 
     stages {
 
         stage('Checkout') {
             steps {
-                git 'https://github.com/ThanujaRatakonda/kp_7.git'
+                git 'https://github.com/ThanujaRatakonda/kp_6.git'
             }
         }
 
-        stage('Build & Push Backend') {
-            when { expression { params.SERVICE in ['all', 'backend'] } }
+        // ---------- FRONTEND ----------
+        stage('Build Frontend') {
+            steps {
+                sh "docker build -t frontend:${IMAGE_TAG} ./frontend"
+            }
+        }
+
+        stage('Scan Frontend') {
             steps {
                 sh """
-                docker build -t backend:${IMAGE_TAG} backend
-                docker tag backend:${IMAGE_TAG} ${HARBOR_URL}/${HARBOR_PROJECT}/backend:${IMAGE_TAG}
-                docker push ${HARBOR_URL}/${HARBOR_PROJECT}/backend:${IMAGE_TAG}
+                trivy image frontend:${IMAGE_TAG} \
+                --severity CRITICAL,HIGH \
+                --format json -o ${TRIVY_OUTPUT_JSON}
                 """
+                archiveArtifacts artifacts: "${TRIVY_OUTPUT_JSON}", fingerprint: true
             }
         }
 
-        stage('Build & Push Frontend') {
-            when { expression { params.SERVICE in ['all', 'frontend'] } }
-            steps {
-                sh """
-                docker build -t frontend:${IMAGE_TAG} frontend
-                docker tag frontend:${IMAGE_TAG} ${HARBOR_URL}/${HARBOR_PROJECT}/frontend:${IMAGE_TAG}
-                docker push ${HARBOR_URL}/${HARBOR_PROJECT}/frontend:${IMAGE_TAG}
-                """
-            }
-        }
-
-        stage('Update Helm values') {
+        stage('Push Frontend') {
             steps {
                 script {
-
-                    if (params.SERVICE in ['all', 'backend']) {
+                    def fullImage = "${HARBOR_URL}/${HARBOR_PROJECT}/frontend:${IMAGE_TAG}"
+                    withCredentials([usernamePassword(
+                        credentialsId: 'harbor-creds',
+                        usernameVariable: 'HARBOR_USER',
+                        passwordVariable: 'HARBOR_PASS'
+                    )]) {
                         sh """
-                        sed -i 's/tag:.*/tag: "${IMAGE_TAG}"/' backend-hc/values.yaml
-                        sed -i 's/namespace:.*/namespace: "${params.NAMESPACE}"/' backend-hc/values.yaml
-                        """
-                    }
-
-                    if (params.SERVICE in ['all', 'frontend']) {
-                        sh """
-                        sed -i 's/tag:.*/tag: "${IMAGE_TAG}"/' frontend-hc/values.yaml
-                        sed -i 's/namespace:.*/namespace: "${params.NAMESPACE}"/' frontend-hc/values.yaml
+                        echo \$HARBOR_PASS | docker login ${HARBOR_URL} -u \$HARBOR_USER --password-stdin
+                        docker tag frontend:${IMAGE_TAG} ${fullImage}
+                        docker push ${fullImage}
+                        docker rmi frontend:${IMAGE_TAG} || true
                         """
                     }
                 }
             }
         }
 
-        stage('Commit & Push to Git') {
+        // ---------- BACKEND ----------
+        stage('Build Backend') {
+            steps {
+                sh "docker build -t backend:${IMAGE_TAG} ./backend"
+            }
+        }
+
+        stage('Scan Backend') {
             steps {
                 sh """
-                git config user.email "ratakondathanuja@gmail.com"
-                git add .
-                git commit -m "Update image tag ${IMAGE_TAG} for ${params.NAMESPACE}"
-                git push origin master
+                trivy image backend:${IMAGE_TAG} \
+                --severity CRITICAL,HIGH \
+                --format json -o ${TRIVY_OUTPUT_JSON}
                 """
+                archiveArtifacts artifacts: "${TRIVY_OUTPUT_JSON}", fingerprint: true
+            }
+        }
+
+        stage('Push Backend') {
+            steps {
+                script {
+                    def fullImage = "${HARBOR_URL}/${HARBOR_PROJECT}/backend:${IMAGE_TAG}"
+                    withCredentials([usernamePassword(
+                        credentialsId: 'harbor-creds',
+                        usernameVariable: 'HARBOR_USER',
+                        passwordVariable: 'HARBOR_PASS'
+                    )]) {
+                        sh """
+                        echo \$HARBOR_PASS | docker login ${HARBOR_URL} -u \$HARBOR_USER --password-stdin
+                        docker tag backend:${IMAGE_TAG} ${fullImage}
+                        docker push ${fullImage}
+                        docker rmi backend:${IMAGE_TAG} || true
+                        """
+                    }
+                }
+            }
+        }
+
+        // ---------- KUBERNETES APPLY ----------
+        stage('Apply Kubernetes Manifests') {
+            steps {
+                sh "kubectl apply -f k8s/ -n ${ENV}"
+                sh "kubectl apply -f argocd/ -n ${ENV}"
             }
         }
     }
