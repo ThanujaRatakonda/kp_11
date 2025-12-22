@@ -132,51 +132,22 @@ pipeline {
     /* =========================
        APPLY K8S RESOURCES (Manifests)
        ========================= */
-
 stage('Apply Kubernetes & ArgoCD Resources') {
   steps {
     script {
       echo "Applying resources for namespace: ${params.ENV}"
-
-      // Render templates and apply correctly
+      
       sh """
-        set -euo pipefail
-
-        export ENV="${params.ENV}"
-
-        # Prepare rendered directories
-        rm -rf rendered
-        mkdir -p rendered/k8s rendered/argocd
-
-        # Render all k8s YAMLs (handles any ${ENV} in files)
-        for f in k8s/*.yaml; do
-          envsubst < "$f" > "rendered/k8s/$(basename "$f")"
-        done
-
-        # Render ArgoCD YAMLs if they reference ${ENV}
-        for f in argocd/*.yaml; do
-          envsubst < "$f" > "rendered/argocd/$(basename "$f")"
-        done
-
-        echo "==== Rendered Namespace ===="
-        cat rendered/k8s/namespace.yaml || true
-
-        # 1) Apply Namespace (cluster-scoped) — DO NOT use -n
-        kubectl apply -f rendered/k8s/namespace.yaml
-
-        # 2) Apply other k8s resources into the target namespace
-        #    Exclude namespace.yaml to avoid re-applying it
-        find rendered/k8s -maxdepth 1 -type f -name '*.yaml' ! -name 'namespace.yaml' -print0 \
-          | xargs -0 -I{} kubectl apply -f {} -n "${ENV}"
-
-        # 3) Apply ArgoCD apps in argocd namespace (if present)
-        if [ -d rendered/argocd ]; then
-          kubectl apply -f rendered/argocd/ -n argocd
-        fi
+        envsubst < k8s/namespace.yaml > k8s/namespace_tmp.yaml
+        cat k8s/namespace_tmp.yaml
+        kubectl apply -f k8s/namespace_tmp.yaml -n ${params.ENV}  // Use `${params.ENV}` here
+        kubectl apply -f k8s/ -n ${params.ENV}  // Use `${params.ENV}` here
+        kubectl apply -f argocd/ -n argocd
       """
     }
   }
 }
+
 
 
   }
