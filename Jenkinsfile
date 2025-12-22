@@ -134,32 +134,11 @@ stage('Apply Kubernetes & ArgoCD Resources') {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'ARGOCD_ONLY'] } }
       steps {
         script {
-          echo "Applying resources for namespace: ${params.ENV}"
-
-          // Set the environment variable explicitly for envsubst to use
           sh """
-            export ENV=${params.ENV}
-
-            # Replace ${ENV} in shared-pvc.yaml directly and apply
-            sed 's/\${ENV}/${ENV}/g' k8s/shared-pvc.yaml > k8s/shared-pvc_tmp.yaml
-            kubectl apply -f k8s/shared-pvc_tmp.yaml --namespace=${params.ENV}
-
-            # Apply PV (no namespace needed for PV)
-            kubectl apply -f k8s/shared-pv.yaml
-
-            # Apply storage class (no namespace needed)
-            kubectl apply -f k8s/shared-storage-class.yaml
+            kubectl apply -f k8s/ -n dev 
           """
-
-          // Apply remaining Kubernetes resources with the correct namespace
           sh """
-            kubectl apply -f k8s/ --namespace=${params.ENV}
-          """
-
-          // Apply ArgoCD resources separately
-          echo "Applying ArgoCD resources"
-          sh """
-            kubectl apply -f argocd/ --namespace=argocd
+            kubectl apply -f argocd/ 
           """
         }
       }
