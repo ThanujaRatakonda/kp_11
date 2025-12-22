@@ -122,24 +122,46 @@ pipeline {
     }
 
     /* =========================
+       CREATE PVC & BIND PV
+       ========================= */
+    stage('Create PVC & Bind PV') {
+      steps {
+        script {
+          // Ensure namespace "dev" exists
+          sh "kubectl get namespace dev || kubectl create namespace dev"
+
+          // Apply the PVC for shared storage
+          sh "kubectl apply -f k8s/shared-pvc.yaml -n dev"
+
+          // Wait for the PVC to be bound to the PV
+          sh """
+            while [[ $(kubectl get pvc shared-pvc -n dev -o=jsonpath='{.status.phase}') != "Bound" ]]; do
+              echo "Waiting for PVC to bind to PV..."
+              sleep 5
+            done
+          """
+        }
+      }
+    }
+
+    /* =========================
        APPLY K8S AND ARGOCD RESOURCES
        ========================= */
     stage('Apply Kubernetes & ArgoCD Resources') {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'ARGOCD_ONLY'] } }
       steps {
         script {
-           sh """
-            kubectl get namespace dev || kubectl create namespace dev
-          """
+          // Apply Kubernetes resources (PV, PVC, etc.)
           sh """
             kubectl apply -f k8s/ -n dev
           """
+
+          // Apply ArgoCD resources
           sh """
-            kubectl apply -f argocd/ 
+            kubectl apply -f argocd/
           """
         }
       }
     }
   }
 }
-
