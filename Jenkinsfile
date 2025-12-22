@@ -11,8 +11,8 @@ pipeline {
   parameters {
     choice(
       name: 'ACTION',
-      choices: ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'],
-      description: 'Run full pipeline or only frontend/backend'
+      choices: ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY', 'ARGOCD_ONLY'],
+      description: 'Run full pipeline, only frontend/backend, or just apply ArgoCD resources'
     )
     // Define the environment parameter for selecting the namespace dynamically
     choice(
@@ -23,7 +23,6 @@ pipeline {
   }
 
   stages {
-
     stage('Checkout') {
       steps {
         git credentialsId: 'git-creds', url: "${GIT_REPO}", branch: 'master'
@@ -130,27 +129,42 @@ pipeline {
     }
 
     /* =========================
-       APPLY K8S RESOURCES (Manifests)
+       APPLY K8S AND ARGOCD RESOURCES TOGETHER
        ========================= */
-stage('Apply Kubernetes & ArgoCD Resources') {
-  steps {
-    script {
-      echo "Applying resources for namespace: ${params.ENV}"
-      sh """
-        kubectl apply -f k8s/ --namespace=${params.ENV}
-      """
-      sh """
-        kubectl apply -f argocd/ --namespace=argocd
-      """
-    }
-  }
-}
+    stage('Apply Kubernetes & ArgoCD Resources') {
+      when { expression { params.ACTION in ['FULL_PIPELINE', 'ARGOCD_ONLY'] } }
+      steps {
+        script {
+          echo "Applying resources for namespace: ${params.ENV}"
 
-  }
+          // Set the environment variable explicitly for envsubst to use
+          sh """
+            export ENV=${params.ENV}
 
-  post {
-    success {
-      echo "Argo CD will deploy automatically."
+            # Substituting ENV directly in shared-pvc.yaml
+            envsubst < k8s/shared-pvc.yaml > k8s/shared-pvc_tmp.yaml
+            kubectl apply -f k8s/shared-pvc_tmp.yaml --namespace=${params.ENV}
+
+            # Apply PV (no namespace needed for PV)
+            kubectl apply -f k8s/shared-pv.yaml
+
+            # Apply storage class (no namespace needed)
+            kubectl apply -f k8s/shared-storage-class.yaml
+          """
+
+          // Apply remaining Kubernetes resources with the correct namespace
+          sh """
+            kubectl apply -f k8s/ --namespace=${params.ENV}
+          """
+
+          // Apply ArgoCD resources separately
+          echo "Applying ArgoCD resources"
+          sh """
+            kubectl apply -f argocd/ --namespace=argocd
+          """
+        }
+      }
     }
+
   }
 }
