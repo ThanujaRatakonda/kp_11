@@ -2,7 +2,7 @@ pipeline {
   agent any
 
   environment {
-    ENV = "dev"
+    ENV = "dev"  // Make sure ENV is set to a valid namespace
     REGISTRY = "10.131.103.92:8090"
     PROJECT  = "kp_9"
     IMAGE_TAG = "${BUILD_NUMBER}"
@@ -130,11 +130,11 @@ pipeline {
     stage('Apply Kubernetes & ArgoCD Resources') {
       steps {
         script {
-          // Apply Kubernetes resources
-          sh "kubectl apply -f k8s/ -n ${ENV}"
-
-          // Apply Argo CD configuration
-          sh "kubectl apply -f argocd/ -n argocd"
+          // Ensure ${ENV} variable is passed correctly to kubectl
+          sh """
+            kubectl apply -f k8s/ -n ${ENV}
+            kubectl apply -f argocd/ -n argocd
+          """
         }
       }
     }
