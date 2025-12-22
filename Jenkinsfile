@@ -36,7 +36,6 @@ pipeline {
     stage('Create Namespaces if not exist') {
       steps {
         script {
-          // Create namespace based on ENV parameter (e.g., dev, qa)
           sh """
             kubectl get namespace ${params.ENV} || kubectl create namespace ${params.ENV}
           """
