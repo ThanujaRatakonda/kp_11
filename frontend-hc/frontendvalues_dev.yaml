@@ -1,7 +1,7 @@
 # Default values for frontend-hc.
 # This is a YAML-formatted file.
 # Declare variables to be passed into your templates.
-namespace: pro
+namespace: dev
 replicaCount: 1
 
 image:
