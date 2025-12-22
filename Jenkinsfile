@@ -6,6 +6,8 @@ pipeline {
     PROJECT  = "kp_9"
     IMAGE_TAG = "${BUILD_NUMBER}"
     GIT_REPO = "https://github.com/ThanujaRatakonda/kp_9.git"
+    DOCKER_USERNAME = "admin"
+    DOCKER_PASSWORD = "Harbor12345"
   }
 
   parameters {
@@ -20,6 +22,22 @@ pipeline {
     stage('Checkout') {
       steps {
         git credentialsId: 'git-creds', url: "${GIT_REPO}", branch: 'master'
+      }
+    }
+
+    /* =========================
+       Create Docker Registry Secret if it doesn't exist
+       ========================= */
+    stage('Create Docker Registry Secret') {
+      steps {
+        script {
+          sh """
+            kubectl get secret regcred -n dev || kubectl create secret docker-registry regcred -n dev \
+              --docker-server=${REGISTRY} \
+              --docker-username=${DOCKER_USERNAME} \
+              --docker-password=${DOCKER_PASSWORD} 
+          """
+        }
       }
     }
 
@@ -121,23 +139,23 @@ pipeline {
     }
 
     /* =========================
-       APPLY K8S AND ARGOCD RESOURCES
+       Apply Kubernetes and ArgoCD Resources (if not already applied)
        ========================= */
     stage('Apply Kubernetes & ArgoCD Resources') {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'ARGOCD_ONLY'] } }
       steps {
         script {
-          // Check and create namespace if it does not exist
+          // Check if ArgoCD resources already exist, if not apply them
           sh """
-            kubectl get namespace dev || kubectl create namespace dev
+            kubectl get application backend -n argocd || kubectl apply -f argocd/backend-app.yaml
+            kubectl get application database -n argocd || kubectl apply -f argocd/database-app.yaml
+            kubectl get application frontend -n argocd || kubectl apply -f argocd/frontend-app.yaml
           """
-          // Apply Kubernetes resources
+          
+          // Apply Kubernetes resources (PVC, PV, etc.)
           sh """
-            kubectl apply -f k8s/ -n dev
-          """
-          // Apply ArgoCD resources
-          sh """
-            kubectl apply -f argocd/ 
+            kubectl get pvc shared-pvc -n dev || kubectl apply -f k8s/shared-pvc.yaml -n dev
+            kubectl get pv shared-pv || kubectl apply -f k8s/shared-pv.yaml
           """
         }
       }
