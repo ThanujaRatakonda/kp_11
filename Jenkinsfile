@@ -142,7 +142,9 @@ pipeline {
         export ENV=${params.ENV}
         echo "Substituting ENV in namespace.yaml"
         envsubst < k8s/namespace.yaml > k8s/namespace_tmp.yaml
-        cat k8s/namespace_tmp.yaml  // Check the file content after substitution
+        
+        # Check the file content after substitution
+        cat k8s/namespace_tmp.yaml
         kubectl apply -f k8s/namespace_tmp.yaml
       """
 
@@ -158,6 +160,7 @@ pipeline {
     }
   }
 }
+
 
   }
 
