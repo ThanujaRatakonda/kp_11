@@ -3,9 +3,9 @@ pipeline {
 
   environment {
     REGISTRY = "10.131.103.92:8090"
-    PROJECT  = "kp_9"
+    PROJECT  = "kp_10"
     IMAGE_TAG = "${BUILD_NUMBER}"
-    GIT_REPO = "https://github.com/ThanujaRatakonda/kp_9.git"
+    GIT_REPO = "https://github.com/ThanujaRatakonda/kp_10.git"
     DOCKER_USERNAME = "admin"
     DOCKER_PASSWORD = "Harbor12345"
   }
