@@ -131,7 +131,7 @@ pipeline {
     /* =========================
        APPLY K8S AND ARGOCD RESOURCES TOGETHER
        ========================= */
-    stage('Apply Kubernetes & ArgoCD Resources') {
+      stage('Apply Kubernetes & ArgoCD Resources') {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'ARGOCD_ONLY'] } }
       steps {
         script {
@@ -140,6 +140,10 @@ pipeline {
           // Set the environment variable explicitly for envsubst to use
           sh """
             export ENV=${params.ENV}
+
+            # Apply the namespace with proper substitution
+            envsubst < k8s/namespace.yaml > k8s/namespace_tmp.yaml
+            kubectl apply -f k8s/namespace_tmp.yaml
 
             # Substituting ENV directly in shared-pvc.yaml
             envsubst < k8s/shared-pvc.yaml > k8s/shared-pvc_tmp.yaml
@@ -165,6 +169,5 @@ pipeline {
         }
       }
     }
-
   }
 }
