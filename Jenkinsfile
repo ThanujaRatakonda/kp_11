@@ -108,8 +108,8 @@ pipeline {
       steps {
         sh """
           git config user.name "thanuja"
-          git config user.email ratakondathanuja@gmail.com"
-          git add frontend-hc/frontendvalues.yaml backend-hc/backendvalues.yaml
+          git config user.email "ratakondathanuja@gmail.com"
+          git add .
           git commit -m "Update images to tag ${IMAGE_TAG}" || echo "No changes"
           git push origin master
         """
