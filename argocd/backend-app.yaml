@@ -19,7 +19,7 @@ spec:
 
   destination:
     server: https://kubernetes.default.svc
-    namespace: dev
+    namespace: {{ .Values.targetNamespace | default "dev" }}
 
   syncPolicy:
     automated:
