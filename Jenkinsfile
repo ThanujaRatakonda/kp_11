@@ -117,7 +117,6 @@ pipeline {
         echo "Deploying Database for ${params.ENV}..."
         # Apply database manifests (StatefulSet/Deployment + Service)
         kubectl apply -f k8s/database-deployment.yaml -n ${params.ENV} || true
-        kubectl apply -f k8s/database-service.yaml -n ${params.ENV} || true
         # Wait for database pod to be ready (max 2 minutes)
         for i in {1..24}; do
           READY=\$(kubectl get pod -l app=database -n ${params.ENV} -o jsonpath='{.items[0].status.containerStatuses[0].ready}' 2>/dev/null || echo "false")
