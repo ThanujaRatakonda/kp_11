@@ -5,8 +5,6 @@ pipeline {
     REGISTRY = "10.131.103.92:8090"
     PROJECT  = "kp_10"
     GIT_REPO = "https://github.com/ThanujaRatakonda/kp_10.git"
-    DOCKER_USERNAME = "admin"
-    DOCKER_PASSWORD = "Harbor12345"
   }
 
   parameters {
@@ -62,7 +60,7 @@ pipeline {
           
           env.IMAGE_TAG = newVersion
           writeFile file: versionFile, text: newVersion
-          echo "✅ New version: ${env.IMAGE_TAG}"
+          echo " New version: ${env.IMAGE_TAG}"
         }
       }
     }
@@ -103,20 +101,14 @@ pipeline {
         }
       }
     }
-
-    stage('Docker Registry Secret') {
-      steps {
-        script {
-          sh """
-            kubectl get secret regcred -n ${params.ENV} >/dev/null 2>&1 || \\
-            kubectl create secret docker-registry regcred -n ${params.ENV} \\
-              --docker-server=${REGISTRY} --docker-username=${DOCKER_USERNAME} --docker-password=${DOCKER_PASSWORD}
-            echo "Registry secret ready"
-          """
-        }
-      }
-    }
-
+stage('Apply Docker Secret') {
+  steps {
+    sh """
+      kubectl apply -f docker-registry-secret.yaml
+      echo "Docker secret applied for ${params.ENV}"
+    """
+  }
+}
     stage('Deploy Database') {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'DATABASE_ONLY'] } }
       steps {
