@@ -4,7 +4,6 @@ pipeline {
   environment {
     REGISTRY = "10.131.103.92:8090"
     PROJECT  = "kp_10"
-    IMAGE_TAG = "${BUILD_NUMBER}"
     GIT_REPO = "https://github.com/ThanujaRatakonda/kp_10.git"
     DOCKER_USERNAME = "admin"
     DOCKER_PASSWORD = "Harbor12345"
@@ -29,7 +28,21 @@ pipeline {
         git credentialsId: 'git-creds', url: "${GIT_REPO}", branch: 'master'
       }
     }
-
+stage('Read Version') { 
+      steps {
+        script {
+          def versionFile = 'version.txt'
+          if (fileExists(versionFile)) {
+            env.IMAGE_TAG = readFile(versionFile).trim()
+            echo " Version from ${versionFile}: ${env.IMAGE_TAG}"
+          } else {
+            env.IMAGE_TAG = "latest"
+            writeFile file: versionFile, text: env.IMAGE_TAG
+            echo "Created ${versionFile} with: latest"
+          }
+        }
+      }
+    }
     stage('Create Namespace') {
       steps {
         script {
