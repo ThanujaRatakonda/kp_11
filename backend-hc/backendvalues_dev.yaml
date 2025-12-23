@@ -94,7 +94,7 @@ volumes:
 
 env:
   - name: DB_HOST
-    value: "database-database-hc"   # Replace with your DB Service name
+    value: "database"   # Replace with your DB Service name
   - name: DB_NAME
     value: "usersdb"
   - name: DB_USER
