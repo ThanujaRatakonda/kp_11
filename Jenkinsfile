@@ -57,7 +57,7 @@ pipeline {
           
           env.IMAGE_TAG = newVersion
           writeFile file: versionFile, text: newVersion
-          echo "✅ New version: ${env.IMAGE_TAG}"
+          echo " New version: ${env.IMAGE_TAG}"
         }
       }
     }
@@ -103,7 +103,7 @@ pipeline {
       steps {
         sh """
           kubectl apply -f docker-registry-secret.yaml
-          echo "✅ Docker secret applied (dev+qa)"
+          echo "Docker secret applied (dev+qa)"
         """
       }
     }
@@ -129,7 +129,7 @@ pipeline {
       steps {
         sh """
           echo "Harbor12345" | docker login ${REGISTRY} -u admin --password-stdin
-          echo "✅ Docker login successful"
+          echo " Docker login successful"
         """
       }
     }
@@ -142,7 +142,9 @@ pipeline {
           docker build -t frontend:${IMAGE_TAG} ./frontend
           docker tag frontend:${IMAGE_TAG} ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}
           docker push ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}
-          echo "✅ Frontend: ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}"
+          docker rmi frontend:${IMAGE_TAG} || true
+          docker image prune -f || true
+          echo " Frontend: ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}"
         """
       }
     }
@@ -155,7 +157,9 @@ pipeline {
           docker build -t backend:${IMAGE_TAG} ./backend
           docker tag backend:${IMAGE_TAG} ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}
           docker push ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}
-          echo "✅ Backend: ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}"
+          docker rmi backend:${IMAGE_TAG} || true
+          docker image prune -f || true
+          echo " Backend: ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}"
         """
       }
     }
