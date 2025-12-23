@@ -114,14 +114,13 @@ pipeline {
         script {
           sh """
              set -e
-        echo "Deploying Database to ${params.ENV}..."
-        helm upgrade --install database ./database-hc \\
-          --namespace ${params.ENV} --values database-hc/databasevalues_${params.ENV}.yaml \\
-          --force --timeout=300s
-        kubectl rollout status sts/database -n ${params.ENV} --timeout=300s
-        echo "Database "
-      """
-            """
+      docker build -t frontend:"${IMAGE_TAG}" ./frontend
+      docker tag frontend:"${IMAGE_TAG}" ${REGISTRY}/${PROJECT}/frontend:"${IMAGE_TAG}"
+      docker push ${REGISTRY}/${PROJECT}/frontend:"${IMAGE_TAG}"
+      docker rmi frontend:"${IMAGE_TAG}" || true
+      docker image prune -f || true
+      echo "Frontend: ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}"
+    """
 
         }
       }
