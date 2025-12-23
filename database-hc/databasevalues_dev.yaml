@@ -11,8 +11,8 @@ image:
   tag: "15"
 
 imagePullSecrets: []
-nameOverride: ""
-fullnameOverride: ""
+nameOverride: database
+fullnameOverride: database
 
 env:
    - name: POSTGRES_USER
