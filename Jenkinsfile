@@ -37,7 +37,6 @@ pipeline {
             def currentVersion = readFile(versionFile).trim()
             echo "Current version: ${currentVersion}"
             
-            // Parse semantic version (v1.0.0 -> 1.0.0)
             def parts = currentVersion.replaceAll(/^v/, '').tokenize('.')
             if (parts.size() == 3) {
               def major = parts[0].toInteger()
@@ -45,10 +44,8 @@ pipeline {
               def patch = parts[2].toInteger()
               
               if (patch >= 9) {
-                // v1.0.9+ → v1.1.0 (reset patch to 0, increment minor)
                 newVersion = "v${major}.${minor + 1}.0"
               } else {
-                // Normal increment: v1.0.5 → v1.0.6
                 newVersion = "v${major}.${minor}.${patch + 1}"
               }
             } else {
@@ -60,7 +57,7 @@ pipeline {
           
           env.IMAGE_TAG = newVersion
           writeFile file: versionFile, text: newVersion
-          echo " New version: ${env.IMAGE_TAG}"
+          echo "✅ New version: ${env.IMAGE_TAG}"
         }
       }
     }
@@ -101,14 +98,16 @@ pipeline {
         }
       }
     }
-stage('Apply Docker Secret') {
-  steps {
-    sh """
-      kubectl apply -f docker-registry-secret.yaml
-      echo "Docker secret applied for ${params.ENV}"
-    """
-  }
-}
+
+    stage('Apply Docker Secret') {
+      steps {
+        sh """
+          kubectl apply -f docker-registry-secret.yaml
+          echo "✅ Docker secret applied (dev+qa)"
+        """
+      }
+    }
+
     stage('Deploy Database') {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'DATABASE_ONLY'] } }
       steps {
@@ -125,38 +124,43 @@ stage('Apply Docker Secret') {
       }
     }
 
+    stage('Docker Login') {
+      when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] } }
+      steps {
+        sh """
+          echo "Harbor12345" | docker login ${REGISTRY} -u admin --password-stdin
+          echo "✅ Docker login successful"
+        """
+      }
+    }
+
     stage('Build & Push Frontend') {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY'] } }
       steps {
-        script {
-          sh """
-            set -e
-            docker build -t frontend:${IMAGE_TAG} ./frontend
-            echo "\${DOCKER_PASSWORD}" | docker login ${REGISTRY} -u ${DOCKER_USERNAME} --password-stdin
-            docker tag frontend:${IMAGE_TAG} ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}
-            docker push ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}
-            echo "Frontend: ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}"
-          """
-        }
+        sh """
+          set -e
+          docker build -t frontend:${IMAGE_TAG} ./frontend
+          docker tag frontend:${IMAGE_TAG} ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}
+          docker push ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}
+          echo "✅ Frontend: ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}"
+        """
       }
     }
 
     stage('Build & Push Backend') {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'BACKEND_ONLY'] } }
       steps {
-        script {
-          sh """
-            set -e
-            docker build -t backend:${IMAGE_TAG} ./backend
-            echo "\${DOCKER_PASSWORD}" | docker login ${REGISTRY} -u ${DOCKER_USERNAME} --password-stdin
-            docker tag backend:${IMAGE_TAG} ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}
-            docker push ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}
-            echo "Backend: ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}"
-          """
-        }
+        sh """
+          set -e
+          docker build -t backend:${IMAGE_TAG} ./backend
+          docker tag backend:${IMAGE_TAG} ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}
+          docker push ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}
+          echo "✅ Backend: ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}"
+        """
       }
     }
 
+    // ... rest of your stages remain SAME
     stage('Update & Commit Helm Values') {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] } }
       steps {
@@ -210,6 +214,7 @@ stage('Apply Docker Secret') {
             kubectl get pods -n ${params.ENV}
             kubectl get svc -n ${params.ENV}
             kubectl get applications -n argocd
+            sh 'docker image prune -f || true'
           """
         }
       }
