@@ -32,42 +32,35 @@ pipeline {
       }
     }
  stage('Read & Update Version') {
-  when {
-    expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] }
-  }
+  when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] } }
   steps {
     script {
-      def versionFile = 'version.txt'
       def newVersion
       
-      if (fileExists(versionFile)) {
-        def currentVersion = readFile(versionFile).trim()
-        echo "Current version: ${currentVersion}"
+      if (params.VERSION_BUMP == 'patch') {
+        // FIXED v1.0.x path only
+        def lastPatch = sh(script: "git tag --list 'v1.0.*' --sort=version:refname | tail -1 || echo 'v1.0.0'", returnStdout: true).trim()
+        def parts = lastPatch.replaceAll(/^v/, '').tokenize('.')
+        newVersion = "v1.0.${parts[2].toInteger() + 1}"
         
-        def parts = currentVersion.replaceAll(/^v/, '').tokenize('.')
-        if (parts.size() == 3) {
-          def major = parts[0].toInteger()
-          def minor = parts[1].toInteger()
-          def patch = parts[2].toInteger()
-          
-          if (params.VERSION_BUMP == 'patch') {
-            newVersion = "v${major}.${minor}.${patch + 1}"
-          } else if (params.VERSION_BUMP == 'minor') {
-            newVersion = "v${major}.${minor + 1}.0"
-          } else if (params.VERSION_BUMP == 'major') {
-            newVersion = "v${major + 1}.0.0"
-          }
-          echo "User chose ${params.VERSION_BUMP}: ${newVersion}"
-        } else {
-          newVersion = "v1.0.1"
-        }
-      } else {
-        newVersion = "v1.0.0"
+      } else if (params.VERSION_BUMP == 'minor') {
+        // FIXED v1.1.x path only  
+        def lastMinor = sh(script: "git tag --list 'v1.1.*' --sort=version:refname | tail -1 || echo 'v1.1.0'", returnStdout: true).trim()
+        def parts = lastMinor.replaceAll(/^v/, '').tokenize('.')
+        newVersion = "v1.1.${parts[2].toInteger() + 1}"
+        
+      } else if (params.VERSION_BUMP == 'major') {
+        // FIXED v2.0.x path only
+        def lastMajor = sh(script: "git tag --list 'v2.0.*' --sort=version:refname | tail -1 || echo 'v2.0.0'", returnStdout: true).trim()
+        def parts = lastMajor.replaceAll(/^v/, '').tokenize('.')
+        newVersion = "v2.0.${parts[2].toInteger() + 1}"
       }
-      
+
       env.IMAGE_TAG = newVersion
-      writeFile file: versionFile, text: newVersion
-      echo "New version: ${env.IMAGE_TAG}"
+      sh "git tag ${newVersion}"
+      sh "git push origin ${newVersion}"
+      writeFile file: 'version.txt', text: newVersion
+      echo "${params.VERSION_BUMP} → ${newVersion}"
     }
   }
 }
