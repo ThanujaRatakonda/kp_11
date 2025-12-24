@@ -35,36 +35,31 @@ pipeline {
   when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] } }
   steps {
     script {
+      def versionFile = 'version.txt'
       def newVersion
       
       if (params.VERSION_BUMP == 'patch') {
-        // FIXED v1.0.x path only
-        def lastPatch = sh(script: "git tag --list 'v1.0.*' --sort=version:refname | tail -1 || echo 'v1.0.0'", returnStdout: true).trim()
-        def parts = lastPatch.replaceAll(/^v/, '').tokenize('.')
-        newVersion = "v1.0.${parts[2].toInteger() + 1}"
+        // AUTO v1.0.x path - ignore version.txt prefix, always use v1.0
+        def currentPatch = fileExists(versionFile) ? readFile(versionFile).trim().tokenize('.')[-1].toInteger() : 0
+        newVersion = "v1.0.${currentPatch + 1}"
         
       } else if (params.VERSION_BUMP == 'minor') {
-        // FIXED v1.1.x path only  
-        def lastMinor = sh(script: "git tag --list 'v1.1.*' --sort=version:refname | tail -1 || echo 'v1.1.0'", returnStdout: true).trim()
-        def parts = lastMinor.replaceAll(/^v/, '').tokenize('.')
-        newVersion = "v1.1.${parts[2].toInteger() + 1}"
+        // AUTO v1.1.x path - ignore version.txt prefix, always use v1.1  
+        def currentPatch = fileExists(versionFile) ? readFile(versionFile).trim().tokenize('.')[-1].toInteger() : 0
+        newVersion = "v1.1.${currentPatch + 1}"
         
       } else if (params.VERSION_BUMP == 'major') {
-        // FIXED v2.0.x path only
-        def lastMajor = sh(script: "git tag --list 'v2.0.*' --sort=version:refname | tail -1 || echo 'v2.0.0'", returnStdout: true).trim()
-        def parts = lastMajor.replaceAll(/^v/, '').tokenize('.')
-        newVersion = "v2.0.${parts[2].toInteger() + 1}"
+        // AUTO v2.0.x path - ignore version.txt prefix, always use v2.0
+        def currentPatch = fileExists(versionFile) ? readFile(versionFile).trim().tokenize('.')[-1].toInteger() : 0
+        newVersion = "v2.0.${currentPatch + 1}"
       }
 
       env.IMAGE_TAG = newVersion
-      sh "git tag ${newVersion}"
-      sh "git push origin ${newVersion}"
-      writeFile file: 'version.txt', text: newVersion
+      writeFile file: versionFile, text: newVersion  // Updates LAST DIGIT only
       echo "${params.VERSION_BUMP} → ${newVersion}"
     }
   }
 }
-
 
     stage('Create Namespace') {
       steps {
