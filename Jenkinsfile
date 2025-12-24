@@ -32,7 +32,7 @@ pipeline {
       }
     }
 
-      stage('Read & Update Version') {
+     stage('Read & Update Version') {
   when {
     expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] }
   }
@@ -54,9 +54,9 @@ pipeline {
           if (params.VERSION_BUMP == 'patch') {
             newVersion = "v${major}.${minor}.${patch + 1}"
           } else if (params.VERSION_BUMP == 'minor') {
-            newVersion = "v${major}.${minor + 1}.0"
+            newVersion = "v${major}.${minor}.${patch + 1}"  // SAME minor, patch+1!
           } else if (params.VERSION_BUMP == 'major') {
-            newVersion = "v${major + 1}.0.0"
+            newVersion = "v${major}.${minor}.${patch + 1}"  // SAME minor, patch+1!
           }
           echo "User chose ${params.VERSION_BUMP}: ${newVersion}"
         } else {
@@ -72,7 +72,6 @@ pipeline {
     }
   }
 }
-
 
     stage('Create Namespace') {
       steps {
