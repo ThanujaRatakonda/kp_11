@@ -35,27 +35,32 @@ pipeline {
   when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] } }
   steps {
     script {
-      def versionFile = 'version.txt'
       def newVersion
       
       if (params.VERSION_BUMP == 'patch') {
-        // AUTO v1.0.x path - ignore version.txt prefix, always use v1.0
-        def currentPatch = fileExists(versionFile) ? readFile(versionFile).trim().tokenize('.')[-1].toInteger() : 0
+        // v1.0.x path - own counter file
+        def patchFile = 'patch_counter.txt'
+        def currentPatch = fileExists(patchFile) ? readFile(patchFile).trim().toInteger() : -1
         newVersion = "v1.0.${currentPatch + 1}"
+        writeFile file: patchFile, text: "${currentPatch + 1}"
         
       } else if (params.VERSION_BUMP == 'minor') {
-        // AUTO v1.1.x path - ignore version.txt prefix, always use v1.1  
-        def currentPatch = fileExists(versionFile) ? readFile(versionFile).trim().tokenize('.')[-1].toInteger() : 0
-        newVersion = "v1.1.${currentPatch + 1}"
+        // v1.1.x path - own counter file  
+        def minorFile = 'minor_counter.txt'
+        def currentMinor = fileExists(minorFile) ? readFile(minorFile).trim().toInteger() : -1
+        newVersion = "v1.1.${currentMinor + 1}"
+        writeFile file: minorFile, text: "${currentMinor + 1}"
         
       } else if (params.VERSION_BUMP == 'major') {
-        // AUTO v2.0.x path - ignore version.txt prefix, always use v2.0
-        def currentPatch = fileExists(versionFile) ? readFile(versionFile).trim().tokenize('.')[-1].toInteger() : 0
-        newVersion = "v2.0.${currentPatch + 1}"
+        // v2.0.x path - own counter file
+        def majorFile = 'major_counter.txt'
+        def currentMajor = fileExists(majorFile) ? readFile(majorFile).trim().toInteger() : -1
+        newVersion = "v2.0.${currentMajor + 1}"
+        writeFile file: majorFile, text: "${currentMajor + 1}"
       }
 
       env.IMAGE_TAG = newVersion
-      writeFile file: versionFile, text: newVersion  // Updates LAST DIGIT only
+      writeFile file: 'version.txt', text: newVersion  // Current build version
       echo "${params.VERSION_BUMP} → ${newVersion}"
     }
   }
