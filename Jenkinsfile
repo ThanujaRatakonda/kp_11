@@ -38,21 +38,19 @@ pipeline {
       def newVersion
       
       if (params.VERSION_BUMP == 'patch') {
-        // v1.0.x path - own counter file
-        def patchFile = 'patch_counter.txt'
-        def currentPatch = fileExists(patchFile) ? readFile(patchFile).trim().toInteger() : -1
-        newVersion = "v1.0.${currentPatch + 1}"
+        def patchFile = 'patch_counter.txt'   //file that keeps track of the patch version c
+         //file doesn't exist initializes counter to -1 (1st version) &set the version to v1.0.0.
+        def currentPatch = fileExists(patchFile) ? readFile(patchFile).trim().toInteger() : -1 
+        newVersion = "v1.0.${currentPatch + 1}"  // reads current version, increments it & set the new version
         writeFile file: patchFile, text: "${currentPatch + 1}"
         
       } else if (params.VERSION_BUMP == 'minor') {
-        // v1.1.x path - own counter file  
         def minorFile = 'minor_counter.txt'
         def currentMinor = fileExists(minorFile) ? readFile(minorFile).trim().toInteger() : -1
         newVersion = "v1.1.${currentMinor + 1}"
         writeFile file: minorFile, text: "${currentMinor + 1}"
         
       } else if (params.VERSION_BUMP == 'major') {
-        // v2.0.x path - own counter file
         def majorFile = 'major_counter.txt'
         def currentMajor = fileExists(majorFile) ? readFile(majorFile).trim().toInteger() : -1
         newVersion = "v2.0.${currentMajor + 1}"
