@@ -31,44 +31,43 @@ pipeline {
         git credentialsId: 'git-creds', url: "${GIT_REPO}", branch: 'master'
       }
     }
-
-     stage('Read & Update Version') {
+stage('Read & Update Version') {
   when {
     expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] }
   }
   steps {
     script {
-      def versionFile = 'version.txt'
-      def newVersion
+      // Read all 3 independent counters
+      def patchVersion = fileExists('patch-version.txt') ? readFile('patch-version.txt').trim().replaceAll(/^v/, '').tokenize('.') : [1,0,0]
+      def minorVersion = fileExists('minor-version.txt') ? readFile('minor-version.txt').trim().replaceAll(/^v/, '').tokenize('.') : [1,0,0]
+      def majorVersion = fileExists('major-version.txt') ? readFile('major-version.txt').trim().replaceAll(/^v/, '').tokenize('.') : [1,0,0]
       
-      if (fileExists(versionFile)) {
-        def currentVersion = readFile(versionFile).trim()
-        echo "Current version: ${currentVersion}"
-        
-        def parts = currentVersion.replaceAll(/^v/, '').tokenize('.')
-        if (parts.size() == 3) {
-          def major = parts[0].toInteger()
-          def minor = parts[1].toInteger()
-          def patch = parts[2].toInteger()
-          
-          if (params.VERSION_BUMP == 'patch') {
-            newVersion = "v${major}.${minor}.${patch + 1}"
-          } else if (params.VERSION_BUMP == 'minor') {
-            newVersion = "v${major}.${minor}.${patch + 1}"  // SAME minor, patch+1!
-          } else if (params.VERSION_BUMP == 'major') {
-            newVersion = "v${major}.${minor}.${patch + 1}"  // SAME minor, patch+1!
-          }
-          echo "User chose ${params.VERSION_BUMP}: ${newVersion}"
-        } else {
-          newVersion = "v1.0.1"
-        }
-      } else {
-        newVersion = "v1.0.0"
+      def major = 1, minor = 0, patch = 0
+      
+      if (params.VERSION_BUMP == 'patch') {
+        def pMajor = patchVersion[0].toInteger()
+        def pMinor = patchVersion[1].toInteger()
+        def pPatch = patchVersion[2].toInteger() + 1
+        major = pMajor; minor = pMinor; patch = pPatch
+        writeFile file: 'patch-version.txt', text: "v${pMajor}.${pMinor}.${pPatch}"
+      } else if (params.VERSION_BUMP == 'minor') {
+        def mMajor = minorVersion[0].toInteger()
+        def mMinor = minorVersion[1].toInteger() + 1
+        def mPatch = 0
+        major = mMajor; minor = mMinor; patch = mPatch
+        writeFile file: 'minor-version.txt', text: "v${mMajor}.${mMinor}.0"
+      } else if (params.VERSION_BUMP == 'major') {
+        def jMajor = majorVersion[0].toInteger() + 1
+        def jMinor = 0
+        def jPatch = 0
+        major = jMajor; minor = jMinor; patch = jPatch
+        writeFile file: 'major-version.txt', text: "v${jMajor}.0.0"
       }
       
-      env.IMAGE_TAG = newVersion
-      writeFile file: versionFile, text: newVersion
-      echo "New version: ${env.IMAGE_TAG}"
+      def finalTag = "v${major}.${minor}.${patch}"
+      env.IMAGE_TAG = finalTag
+      writeFile file: 'version.txt', text: finalTag
+      echo "User chose ${params.VERSION_BUMP}: ${finalTag}"
     }
   }
 }
