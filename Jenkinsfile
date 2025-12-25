@@ -29,12 +29,6 @@ pipeline {
     stage('Checkout') {
       steps {
         git credentialsId: 'git-creds', url: "${GIT_REPO}", branch: 'master'
-        sh '''
-          echo "📍 Current K8s context:"
-          kubectl config current-context
-          kubectl cluster-info || true
-          echo "✅ Checkout complete"
-        '''
       }
     }
     
@@ -68,90 +62,107 @@ pipeline {
 
     stage('Create Namespace') {
       steps {
-        timeout(time: 2, unit: 'MINUTES') {
-          sh """
-            kubectl get namespace ${params.ENV} >/dev/null 2>&1 || kubectl create namespace ${params.ENV}
-            kubectl get namespace ${params.ENV}
-            echo "✅ Namespace ${params.ENV} ready!"
-          """
-        }
+        sh """
+          kubectl get namespace ${params.ENV} >/dev/null 2>&1 || kubectl create namespace ${params.ENV}
+          echo "Namespace ${params.ENV} ready ✅"
+        """
       }
     }
 
     stage('Apply Storage') {
       steps {
-        timeout(time: 12, unit: 'MINUTES') {
+        timeout(time: 10, unit: 'MINUTES') {
           sh """
+            set -e
+            
             ENV_NS="${params.ENV}"
             PV_NAME="shared-pv-\$ENV_NS"
             PVC_NAME="shared-pvc"
             
-            echo "🔧 Fixing storage for \$ENV_NS (minikube)..."
+            echo "🔧 Fixing PVC binding for \$ENV_NS..."
             
-            # Aggressive cleanup
-            echo "🧹 Force deleting existing resources..."
+            # 1. FORCE DELETE everything first
             kubectl delete pvc \$PVC_NAME -n \$ENV_NS --ignore-not-found --force --grace-period=0 || true
             kubectl delete pv \$PV_NAME --ignore-not-found --force --grace-period=0 || true
-            sleep 10
+            sleep 8
             
-            # Apply in correct order
-            echo "📦 Applying StorageClass..."
-            kubectl apply -f k8s/shared-storage-class.yaml || { echo "❌ StorageClass failed"; exit 1; }
+            # 2. Create StorageClass
+            kubectl apply -f k8s/shared-storage-class.yaml
             
-            echo "📦 Applying PV..."
-            kubectl apply -f k8s/shared-pv_\${ENV_NS}.yaml || { echo "❌ PV failed"; exit 1; }
-            
-            # Wait for PV to be available
+            # 3. Create PV first and wait for Available
+            kubectl apply -f k8s/shared-pv_\${ENV_NS}.yaml
+            echo "⏳ Waiting for PV to be Available..."
             for i in {1..12}; do
-              PV_STATUS=\$(kubectl get pv \$PV_NAME -o jsonpath='{.status.phase}' 2>/dev/null || echo "None")
+              PV_STATUS=\$(kubectl get pv \$PV_NAME -o jsonpath='{.status.phase}' 2>/dev/null || echo "Pending")
               echo "PV [\$i/12]: \$PV_STATUS"
-              if [ "\$PV_STATUS" = "Available" ]; then
-                echo "✅ PV Available!"
-                break
-              fi
-              sleep 10
+              [ "\$PV_STATUS" = "Available" ] && echo "✅ PV READY!" && break
+              sleep 8
             done
             
-            echo "📦 Applying PVC..."
-            kubectl apply -f k8s/shared-pvc_\${ENV_NS}.yaml -n \$ENV_NS || { echo "❌ PVC failed"; exit 1; }
+            # 4. Create PVC
+            kubectl apply -f k8s/shared-pvc_\${ENV_NS}.yaml -n \$ENV_NS
             
-            # Wait for PVC to bind (minikube friendly)
-            echo "⏳ Waiting PVC to bind (max 120s)..."
-            for i in {1..12}; do
-              PVC_STATUS=\$(kubectl get pvc \$PVC_NAME -n \$ENV_NS -o jsonpath='{.status.phase}' 2>/dev/null || echo "Pending")
-              PVC_BOUND=\$(kubectl get pvc \$PVC_NAME -n \$ENV_NS -o jsonpath='{.status.conditions[?(@.type=="FileSystemResizePending")].status}' 2>/dev/null || echo "None")
-              echo "[\$i/12] PVC: \$PVC_STATUS | Bound: \$PVC_BOUND"
-              
-              if [ "\$PVC_STATUS" = "Bound" ]; then 
-                echo "🎉 PVC BOUND SUCCESS!"
-                break 
-              fi
-              sleep 10
+            # 5. Wait for PVC to bind
+            echo "⏳ Waiting for PVC to bind..."
+            for i in {1..30}; do
+              PHASE=\$(kubectl get pvc \$PVC_NAME -n \$ENV_NS -o jsonpath='{.status.phase}' 2>/dev/null || echo "Pending")
+              PV_NAME_BOUND=\$(kubectl get pvc \$PVC_NAME -n \$ENV_NS -o jsonpath='{.spec.volumeName}' 2>/dev/null || echo "None")
+              echo "[\$i/30] PVC: \$PHASE | Bound to: \$PV_NAME_BOUND"
+              [ "\$PHASE" = "Bound" ] && echo "🎉 PVC BOUND SUCCESS!" && break
+              sleep 6
             done
             
-            # Final verification
+            # 6. FINAL CHECK
             kubectl get pv \$PV_NAME -o wide
             kubectl get pvc \$PVC_NAME -n \$ENV_NS -o wide
-            kubectl describe pvc \$PVC_NAME -n \$ENV_NS | grep -A5 -B5 "Events"
-            echo "✅ STORAGE READY FOR MINIKUBE!"
+            echo "✅ STORAGE PERFECTLY BOUND!"
           """
         }
       }
     }
 
-    stage('Verify Docker Secret') {
+    stage('Apply Docker Secret') {
       steps {
-        timeout(time: 30, unit: 'SECONDS') {
-          sh "kubectl get secret regcred -n ${params.ENV} >/dev/null 2>&1 && echo '✅ Secret OK' || echo '⚠️ Continuing...'"
-        }
+        sh """
+          kubectl apply -f docker-registry-secret.yaml -n ${params.ENV}
+          echo "✅ Docker secret applied to ${params.ENV}"
+        """
+      }
+    }
+
+    stage('Deploy Database') {
+      when { expression { params.ACTION in ['FULL_PIPELINE', 'DATABASE_ONLY'] } }
+      steps {
+        sh """
+          set -e
+          echo "Deploying Database for ${params.ENV}..."
+          kubectl apply -f k8s/database-deployment.yaml -n ${params.ENV} || true
+          for i in {1..24}; do
+            READY=\$(kubectl get pod -l app=database -n ${params.ENV} -o jsonpath='{.items[0].status.containerStatuses[0].ready}' 2>/dev/null || echo "false")
+            STATUS=\$(kubectl get pod -l app=database -n ${params.ENV} --no-headers -o custom-columns=STATUS:.status.phase 2>/dev/null || echo "Pending")
+            echo "Database pod status: \$STATUS (ready: \$READY) (\$i/24)"
+            [ "\$READY" = "true" ] && [ "\$STATUS" = "Running" ] && echo "Database is READY!" && break
+            sleep 5
+          done
+          kubectl get svc -l app=database -n ${params.ENV}
+        """
       }
     }
 
     stage('Docker Login') {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] } }
       steps {
-        withCredentials([usernamePassword(credentialsId: 'harbor-creds', usernameVariable: 'HARBOR_USER', passwordVariable: 'HARBOR_PASS')]) {
-          sh "echo \"\$HARBOR_PASS\" | docker login ${REGISTRY} -u \"\$HARBOR_USER\" --password-stdin && echo '✅ Docker login OK'"
+        withCredentials([
+          usernamePassword(
+            credentialsId: 'harbor-creds',
+            usernameVariable: 'HARBOR_USER',
+            passwordVariable: 'HARBOR_PASS'
+          )
+        ]) {
+          sh """
+            echo "$HARBOR_PASS" | docker login ${REGISTRY} -u "$HARBOR_USER" --password-stdin
+            echo "Docker login successful ✅"
+          """
         }
       }
     }
@@ -160,10 +171,12 @@ pipeline {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY'] } }
       steps {
         sh """
+          set -e
           docker build -t frontend:${IMAGE_TAG} ./frontend
           docker tag frontend:${IMAGE_TAG} ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}
           docker push ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}
           docker rmi frontend:${IMAGE_TAG} || true
+          docker image prune -f || true
           echo "✅ Frontend: ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}"
         """
       }
@@ -173,10 +186,12 @@ pipeline {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'BACKEND_ONLY'] } }
       steps {
         sh """
+          set -e
           docker build -t backend:${IMAGE_TAG} ./backend
           docker tag backend:${IMAGE_TAG} ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}
           docker push ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}
           docker rmi backend:${IMAGE_TAG} || true
+          docker image prune -f || true
           echo "✅ Backend: ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}"
         """
       }
@@ -187,16 +202,19 @@ pipeline {
       steps {
         withCredentials([usernamePassword(credentialsId: 'GitHub', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_TOKEN')]) {
           sh """
+            set -e
+            echo "Updating Helm values..."
             sed -i 's|repository:.*|repository: ${REGISTRY}/${PROJECT}/frontend|' frontend-hc/frontendvalues_${params.ENV}.yaml
             sed -i 's|tag:.*|tag: ${IMAGE_TAG}|' frontend-hc/frontendvalues_${params.ENV}.yaml
             sed -i 's|repository:.*|repository: ${REGISTRY}/${PROJECT}/backend|' backend-hc/backendvalues_${params.ENV}.yaml
             sed -i 's|tag:.*|tag: ${IMAGE_TAG}|' backend-hc/backendvalues_${params.ENV}.yaml
+            
             git config user.name "Thanuja"
             git config user.email "ratakondathanuja@gmail.com"
-            git add frontend-hc/frontendvalues_${params.ENV}.yaml backend-hc/backendvalues_${params.ENV}.yaml version.txt || true
-            git commit -m "chore: images ${IMAGE_TAG} for ${params.ENV} [skip ci]" || true
-            git push https://\$GIT_USER:\$GIT_TOKEN@github.com/ThanujaRatakonda/kp_10.git master || true
-            echo "✅ Git updated"
+            git add frontend-hc/frontendvalues_${params.ENV}.yaml backend-hc/backendvalues_${params.ENV}.yaml version.txt
+            git commit -m "chore: images ${IMAGE_TAG} for ${params.ENV} [skip ci]" || echo "No changes"
+            git push https://${GIT_USER}:${GIT_TOKEN}@github.com/ThanujaRatakonda/kp_10.git master
+            echo "✅ Helm values updated!"
           """
         }
       }
@@ -205,15 +223,19 @@ pipeline {
     stage('Apply ArgoCD Apps') {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'ARGOCD_ONLY', 'DATABASE_ONLY'] } }
       steps {
-        timeout(time: 3, unit: 'MINUTES') {
+        timeout(time: 5, unit: 'MINUTES') {
           sh """
-            kubectl apply -f argocd/backend_${params.ENV}.yaml || true
-            kubectl apply -f argocd/frontend_${params.ENV}.yaml || true
-            kubectl apply -f argocd/database-app_${params.ENV}.yaml || true
-            kubectl annotate application frontend -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
-            kubectl annotate application backend -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
-            kubectl annotate application database -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
-            echo "✅ ArgoCD refreshed"
+            set -e
+            echo "Applying ArgoCD for ${params.ENV}..."
+            kubectl apply -f argocd/backend_${params.ENV}.yaml -n argocd
+            kubectl apply -f argocd/frontend_${params.ENV}.yaml -n argocd
+            kubectl apply -f argocd/database-app_${params.ENV}.yaml -n argocd
+            
+            sleep 5
+            kubectl annotate application backend-${params.ENV} -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
+            kubectl annotate application frontend-${params.ENV} -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
+            kubectl annotate application database-${params.ENV} -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
+            echo "✅ ArgoCD refreshed!"
           """
         }
       }
@@ -221,14 +243,14 @@ pipeline {
 
     stage('Verify Deployment') {
       steps {
-        timeout(time: 2, unit: 'MINUTES') {
+        timeout(time: 3, unit: 'MINUTES') {
           sh """
-            echo "=== FINAL STATUS ${params.ENV} ==="
-            kubectl get pods -n ${params.ENV} -o wide || true
-            kubectl get svc -n ${params.ENV} || true
-            kubectl get pvc -n ${params.ENV} || true
-            kubectl get applications -n argocd | grep -E "(frontend|backend|database)" || true
-            echo "🎉 FULL PIPELINE COMPLETE!"
+            echo "=== 🎉 FINAL STATUS ${params.ENV} ==="
+            kubectl get pods -n ${params.ENV} -o wide
+            kubectl get svc -n ${params.ENV}
+            kubectl get pvc -n ${params.ENV}
+            kubectl get applications -n argocd | grep ${params.ENV}
+            echo "✅ PIPELINE COMPLETE! Check ArgoCD UI"
           """
         }
       }
@@ -237,16 +259,19 @@ pipeline {
 
   post {
     always {
-      sh "kubectl get ns ${params.ENV} || true"
+      sh """
+        echo "=== FINAL CLEANUP ==="
+        kubectl get ns ${params.ENV} || true
+        kubectl get pvc -n ${params.ENV} || true
+      """ || true
     }
     success {
-      echo "🎉 FULL_PIPELINE SUCCESS! ${params.ENV} with ${IMAGE_TAG}"
+      echo "🎉 SUCCESS! ${params.ENV} deployed with ${IMAGE_TAG}"
     }
     failure {
-      echo "❌ FAILED - check logs"
+      echo "❌ FAILED - Debug PVC above"
       sh """
-        echo "=== DEBUG INFO ==="
-        kubectl get pvc -n ${params.ENV} -o yaml || true
+        kubectl describe pvc shared-pvc -n ${params.ENV} || true
         kubectl get events -n ${params.ENV} --sort-by=.lastTimestamp | tail -10 || true
       """ || true
     }
