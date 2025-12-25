@@ -122,28 +122,6 @@ pipeline {
     }
   }
 }
-
-    stage('Deploy Database') {
-      when { expression { params.ACTION in ['FULL_PIPELINE', 'DATABASE_ONLY'] } }
-      steps {
-        script {
-          sh """
-             set -e
-            echo "Deploying Database for ${params.ENV}..."
-            kubectl apply -f k8s/database-deployment.yaml -n ${params.ENV} || true
-            for i in {1..24}; do
-              READY=\$(kubectl get pod -l app=database -n ${params.ENV} -o jsonpath='{.items[0].status.containerStatuses[0].ready}' 2>/dev/null || echo "false")
-              STATUS=\$(kubectl get pod -l app=database -n ${params.ENV} --no-headers -o custom-columns=STATUS:.status.phase 2>/dev/null || echo "Pending")
-              echo "Database pod status: \$STATUS (ready: \$READY) (\$i/24)"
-              [ "\$READY" = "true" ] && [ "\$STATUS" = "Running" ] && echo "Database is READY!" && break
-              sleep 5
-            done
-            kubectl get svc -l app=database -n ${params.ENV}
-          """
-        }
-      }
-    }
-
     stage('Docker Login') {
       when {
         expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] }
