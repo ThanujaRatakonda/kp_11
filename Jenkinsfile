@@ -29,10 +29,11 @@ pipeline {
     stage('Checkout') {
       steps {
         git credentialsId: 'git-creds', url: "${GIT_REPO}", branch: 'master'
+        echo "✅ Checked out code from ${GIT_REPO}"
       }
     }
 
-    stage('Read & Update Version') {
+    stage('Version Bump') {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] } }
       steps {
         script {
@@ -46,105 +47,19 @@ pipeline {
           } else if (params.VERSION_BUMP == 'minor') {
             def minorFile = 'minor_counter.txt'
             def currentMinor = fileExists(minorFile) ? readFile(minorFile).trim().toInteger() : -1
-            newVersion = "v1.1.${currentMinor + 1}"
+            newVersion = "v1.${currentMinor + 1}.0"
             writeFile file: minorFile, text: "${currentMinor + 1}"
           } else if (params.VERSION_BUMP == 'major') {
             def majorFile = 'major_counter.txt'
-            def currentMajor = fileExists(majorFile) ? readFile(majorFile).trim().toInteger() : -1
-            newVersion = "v2.0.${currentMajor + 1}"
+            def currentMajor = fileExists(majorFile) ? readFile(majorFile).trim().toInteger() : 0
+            newVersion = "v${currentMajor + 1}.0.0"
             writeFile file: majorFile, text: "${currentMajor + 1}"
           }
 
           env.IMAGE_TAG = newVersion
           writeFile file: 'version.txt', text: newVersion
-          echo "${params.VERSION_BUMP} → ${newVersion}"
+          echo "🎯 ${params.VERSION_BUMP} → ${newVersion}"
         }
-      }
-    }
-
-    stage('Create Namespace') {
-      steps {
-        sh """
-          kubectl get namespace ${params.ENV} >/dev/null 2>&1 || kubectl create namespace ${params.ENV}
-          echo "✅ Namespace ${params.ENV} ready"
-        """
-      }
-    }
-
-    stage('Apply Storage') {
-  steps {
-    script {
-      def ENV_NS = params.ENV
-      def PV_FILE = "k8s/shared-pv_${ENV_NS}.yaml"
-      def PVC_FILE = "k8s/shared-pvc_${ENV_NS}.yaml"
-      
-      sh """
-        echo "🔧 FORCE CLEANING STUCK STORAGE for ${ENV_NS}..."
-        
-        # KILL STUCK FINALIZERS FIRST (CRITICAL!)
-        kubectl patch pvc shared-pvc -n ${ENV_NS} -p '{"metadata":{"finalizers":null}}' --timeout=30s || true
-        kubectl delete pvc shared-pvc -n ${ENV_NS} --grace-period=0 --force || true
-        kubectl delete pv shared-pv-${ENV_NS} --grace-period=0 --force || true
-        
-        # Wait for cleanup
-        sleep 5
-        
-        # CREATE HOST PATH
-        mkdir -p /data/shared-${ENV_NS} || sudo mkdir -p /data/shared-${ENV_NS}
-        chmod 777 /data/shared-${ENV_NS} || sudo chmod 777 /data/shared-${ENV_NS}
-        
-        echo "📦 Applying FRESH storage..."
-        kubectl apply -f k8s/shared-storage-class.yaml
-        kubectl apply -f ${PV_FILE}
-        kubectl apply -f ${PVC_FILE}
-        
-        echo "⏳ SIMPLE WAIT FOR PVC BIND (no complex loops)..."
-        for i in {1..30}; do
-          sleep 6
-          PHASE=\$(kubectl get pvc shared-pvc -n ${ENV_NS} -o jsonpath='{.status.phase}' 2>/dev/null || echo "ERROR")
-          if [ "\$PHASE" = "Bound" ]; then 
-            echo "✅ PVC BOUND IN ${i}s!"
-            kubectl get pvc -n ${ENV_NS}
-            exit 0
-          fi
-          echo "PVC [\$i/30]: \$PHASE"
-        done
-        
-        echo "❌ PVC FAILED! DEBUG:"
-        kubectl get pvc -n ${ENV_NS} -o yaml
-        kubectl get pv | grep ${ENV_NS}
-        kubectl describe pvc shared-pvc -n ${ENV_NS}
-        exit 1
-      """
-    }
-  }
-}
-
-    stage('Apply Docker Secret') {
-      steps {
-        sh """
-          kubectl apply -f docker-registry-secret.yaml || true
-          echo "✅ Docker secret applied to ${params.ENV}"
-        """
-      }
-    }
-
-    stage('Deploy Database') {
-      when { expression { params.ACTION in ['FULL_PIPELINE', 'DATABASE_ONLY'] } }
-      steps {
-        sh """
-          echo "Deploying Database for ${params.ENV}..."
-          kubectl apply -f k8s/database-deployment.yaml -n ${params.ENV} || true
-          
-          for i in {1..24}; do
-            READY=\$(kubectl get pod -l app=database -n ${params.ENV} -o jsonpath='{.items[0].status.containerStatuses[0].ready}' 2>/dev/null || echo "false")
-            STATUS=\$(kubectl get pod -l app=database -n ${params.ENV} --no-headers -o custom-columns=STATUS:.status.phase 2>/dev/null || echo "Pending")
-            echo "Database[\$i]: \$STATUS (ready: \$READY)"
-            [ "\$READY" = "true" ] && [ "\$STATUS" = "Running" ] && echo "✅ Database READY!" && break
-            sleep 5
-          done
-          kubectl get svc -l app=database -n ${params.ENV}
-        """
       }
     }
 
@@ -170,11 +85,9 @@ pipeline {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY'] } }
       steps {
         sh """
-          docker build -t frontend:${IMAGE_TAG} ./frontend
-          docker tag frontend:${IMAGE_TAG} ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}
+          docker build -t ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG} ./frontend
           docker push ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}
-          docker rmi frontend:${IMAGE_TAG} || true
-          docker image prune -f || true
+          docker image prune -f
           echo "✅ Frontend: ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}"
         """
       }
@@ -184,26 +97,28 @@ pipeline {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'BACKEND_ONLY'] } }
       steps {
         sh """
-          docker build -t backend:${IMAGE_TAG} ./backend
-          docker tag backend:${IMAGE_TAG} ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}
+          docker build -t ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG} ./backend
           docker push ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}
-          docker rmi backend:${IMAGE_TAG} || true
-          docker image prune -f || true
+          docker image prune -f
           echo "✅ Backend: ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}"
         """
       }
     }
 
-    stage('Update & Commit Helm Values') {
+    stage('Update Helm Values & Commit') {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] } }
       steps {
         script {
           sh """
-            echo "Updating Helm values..."
+            echo "🔄 Updating Helm values for ${params.ENV}..."
             sed -i 's|repository:.*|repository: ${REGISTRY}/${PROJECT}/frontend|' frontend-hc/frontendvalues_${params.ENV}.yaml
             sed -i 's|tag:.*|tag: ${IMAGE_TAG}|' frontend-hc/frontendvalues_${params.ENV}.yaml
             sed -i 's|repository:.*|repository: ${REGISTRY}/${PROJECT}/backend|' backend-hc/backendvalues_${params.ENV}.yaml
             sed -i 's|tag:.*|tag: ${IMAGE_TAG}|' backend-hc/backendvalues_${params.ENV}.yaml
+            
+            echo "📝 Helm values updated:"
+            grep -E 'repository|tag' frontend-hc/frontendvalues_${params.ENV}.yaml
+            grep -E 'repository|tag' backend-hc/backendvalues_${params.ENV}.yaml
           """
           
           withCredentials([usernamePassword(credentialsId: 'GitHub', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_TOKEN')]) {
@@ -211,29 +126,58 @@ pipeline {
               git config user.name "Thanuja"
               git config user.email "ratakondathanuja@gmail.com"
               git add frontend-hc/frontendvalues_${params.ENV}.yaml backend-hc/backendvalues_${params.ENV}.yaml version.txt
-              git commit -m "chore: images ${IMAGE_TAG} for ${params.ENV}" || echo "No changes"
+              git commit -m "chore: update images to ${IMAGE_TAG} for ${params.ENV} env" || echo "No changes to commit"
               git push https://\$GIT_USER:\$GIT_TOKEN@github.com/ThanujaRatakonda/kp_10.git master
+              echo "✅ Pushed to GitHub → ArgoCD will auto-sync!"
             """
           }
         }
       }
     }
 
-    stage('Apply ArgoCD Apps') {
+    stage('Apply ArgoCD Applications') {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'ARGOCD_ONLY', 'DATABASE_ONLY'] } }
       steps {
         sh """
-          echo "Applying ArgoCD for ${params.ENV}..."
+          echo "🚀 Applying ArgoCD Applications for ${params.ENV}..."
+          
+          # Apply Docker registry secret (needed for image pulls)
+          kubectl apply -f docker-registry-secret.yaml
+          
+          # Apply all ArgoCD apps (they auto-create namespaces)
           kubectl apply -f argocd/backend_${params.ENV}.yaml
           kubectl apply -f argocd/frontend_${params.ENV}.yaml
           kubectl apply -f argocd/database-app_${params.ENV}.yaml
           
+          echo "🔄 Triggering hard refresh..."
           kubectl annotate application backend-${params.ENV} -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
           kubectl annotate application frontend-${params.ENV} -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
           kubectl annotate application database-${params.ENV} -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
           
-          echo "⏳ Waiting for ArgoCD sync..."
-          sleep 10
+          echo "⏳ Waiting for ArgoCD sync (30s)..."
+          sleep 30
+          
+          echo "📊 ArgoCD Application Status:"
+          kubectl get applications -n argocd | grep ${params.ENV}
+        """
+      }
+    }
+
+    stage('Wait for Deployment') {
+      steps {
+        sh """
+          echo "⏳ Waiting for pods to be ready in ${params.ENV}..."
+          for i in {1..60}; do
+            READY_PODS=\$(kubectl get pods -n ${params.ENV} -o jsonpath='{range .items[*]}{@.metadata.name}{":"}{@.status.containerStatuses[0].ready}{" "}{end}' 2>/dev/null | grep ":true" | wc -l || echo 0)
+            TOTAL_PODS=\$(kubectl get pods -n ${params.ENV} --no-headers 2>/dev/null | wc -l || echo 0)
+            echo "[\$i/60] \$READY_PODS/\$TOTAL_PODS pods ready"
+            
+            if [ "\$TOTAL_PODS" -gt 0 ] && [ "\$READY_PODS" = "\$TOTAL_PODS" ]; then
+              echo "✅ All pods READY!"
+              break
+            fi
+            sleep 10
+          done
         """
       }
     }
@@ -241,17 +185,26 @@ pipeline {
     stage('Verify Deployment') {
       steps {
         sh """
-          echo "=== 🚀 FINAL STATUS ==="
-          echo "Pods:"
+          echo "=== 🎉 FINAL DEPLOYMENT STATUS ==="
+          echo "📦 Namespace: ${params.ENV}"
+          
+          echo -e "\\n🐳 PODS:"
           kubectl get pods -n ${params.ENV} -o wide
-          echo -e "\\nServices:"
+          
+          echo -e "\\n🌐 SERVICES:"
           kubectl get svc -n ${params.ENV}
-          echo -e "\\nArgoCD Apps:"
-          kubectl get applications -n argocd | grep ${params.ENV}
-          echo -e "\\nPVC Status:"
+          
+          echo -e "\\n💾 STORAGE:"
           kubectl get pvc -n ${params.ENV}
-          echo -e "\\nPV Status:"
           kubectl get pv | grep ${params.ENV}
+          
+          echo -e "\\n🔗 ARGOCD APPS:"
+          kubectl get applications -n argocd | grep ${params.ENV} -A 3 -B 1
+          
+          echo -e "\\n📋 EVENTS (last 10):"
+          kubectl get events -n ${params.ENV} --sort-by='.lastTimestamp' | tail -10
+          
+          echo -e "\\n✅ Images deployed: ${IMAGE_TAG}"
         """
       }
     }
@@ -260,16 +213,25 @@ pipeline {
   post {
     always {
       sh """
-        echo "Pipeline completed for ENV=${params.ENV}, ACTION=${params.ACTION}"
-        kubectl get pods -n ${params.ENV} || true
+        echo "=== PIPELINE SUMMARY ===
+        ENV: ${params.ENV}
+        ACTION: ${params.ACTION}
+        IMAGE_TAG: ${IMAGE_TAG ?: 'N/A'}
+        "
+        kubectl get pods -n ${params.ENV} -o wide || true
       """
     }
     success {
-      echo "🎉 PIPELINE SUCCESSFUL!"
+      echo "🎉 PIPELINE SUCCESSFUL! Deployment completed for ${params.ENV}"
     }
     failure {
       echo "💥 PIPELINE FAILED!"
-      sh "kubectl get events -n ${params.ENV} --sort-by='.lastTimestamp' | tail -10 || true"
+      sh """
+        echo "🔍 Last 15 events in ${params.ENV}:"
+        kubectl get events -n ${params.ENV} --sort-by='.lastTimestamp' | tail -15 || true
+        echo "🔍 ArgoCD app status:"
+        kubectl get applications -n argocd | grep ${params.ENV} || true
+      """
     }
   }
 }
