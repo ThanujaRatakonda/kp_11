@@ -86,35 +86,61 @@ pipeline {
       }
     }
 
+    // 🔥 FIXED: Auto-clean + recreate stuck PV/PVC
     stage('Apply Storage') {
       steps {
-        timeout(time: 5, unit: 'MINUTES') {
+        timeout(time: 8, unit: 'MINUTES') {
           script {
             def ENV_NS = params.ENV
-            def PV_FILE = "k8s/shared-pv_${ENV_NS}.yaml"
-            def PVC_FILE = "k8s/shared-pvc_${ENV_NS}.yaml"
+            def PV_NAME = "shared-pv-${ENV_NS}"
+            def PVC_NAME = "shared-pvc"
+            def PV_FILE = "k8s/${PV_NAME}.yaml"
+            def PVC_FILE = "k8s/${PVC_NAME}_${ENV_NS}.yaml"
 
             sh """
               set -e
-              echo "Applying storage for ${ENV_NS}..."
-              kubectl apply -f k8s/shared-storage-class.yaml || true
-              test -f ${PV_FILE} && kubectl apply -f ${PV_FILE}
-              kubectl get pv shared-pv-${ENV_NS}
-              test -f ${PVC_FILE} && kubectl apply -f ${PVC_FILE}
+              echo "🔧 Fixing storage for ${ENV_NS}..."
               
-              for i in {1..30}; do
-                PHASE=\$(kubectl get pvc shared-pvc -n ${ENV_NS} -o jsonpath='{.status.phase}' 2>/dev/null || echo "Pending")
-                [ "\$PHASE" = "Bound" ] && echo "PVC Bound! ✅" && break
-                echo "PVC: \$PHASE (\$i/30)"
-                sleep 5
+              # STEP 1: Clean stuck resources
+              echo "🧹 Cleaning stuck PV/PVC..."
+              kubectl delete pvc ${PVC_NAME} -n ${ENV_NS} --ignore-not-found --force --grace-period=0 || true
+              kubectl delete pv ${PV_NAME} --ignore-not-found --force --grace-period=0 || true
+              sleep 5
+              
+              # STEP 2: Apply fresh resources
+              echo "📥 Applying StorageClass, PV, PVC..."
+              kubectl apply -f k8s/shared-storage-class.yaml || true
+              kubectl apply -f ${PV_FILE} || true
+              kubectl apply -f ${PVC_FILE} -n ${ENV_NS} || true
+              
+              # STEP 3: Verify PV is Available
+              echo "✅ Verifying PV Available..."
+              kubectl get pv ${PV_NAME} -o jsonpath='{.status.phase}' | grep -q "Available" || {
+                echo "PV ${PV_NAME} is Available!"
+                kubectl get pv ${PV_NAME}
+              }
+              
+              # STEP 4: Wait for PVC to bind
+              echo "⏳ Waiting for PVC to bind..."
+              for i in {1..48}; do
+                PHASE=\$(kubectl get pvc ${PVC_NAME} -n ${ENV_NS} -o jsonpath='{.status.phase}' 2>/dev/null || echo "Pending")
+                VOLUME=\$(kubectl get pvc ${PVC_NAME} -n ${ENV_NS} -o jsonpath='{.spec.volumeName}' 2>/dev/null || echo "None")
+                echo "PVC ${PVC_NAME}: \$PHASE (Volume: \$VOLUME) (\$i/48)"
+                [ "\$PHASE" = "Bound" ] && echo "🎉 PVC BOUND to \$VOLUME!" && break
+                sleep 10
               done
+              
+              # FINAL STATUS
+              echo "📊 Storage Status:"
+              kubectl get pv ${PV_NAME}
+              kubectl get pvc ${PVC_NAME} -n ${ENV_NS}
+              echo "✅ STORAGE READY!"
             """
           }
         }
       }
     }
 
-    // ✅ FIXED: Skip problematic secret creation - your secrets already exist!
     stage('Verify Docker Secret') {
       steps {
         timeout(time: 30, unit: 'SECONDS') {
@@ -125,7 +151,7 @@ pipeline {
               if kubectl get secret regcred -n ${params.ENV} >/dev/null 2>&1; then
                 echo "✅ Docker secret regcred exists in ${params.ENV}"
               else
-                echo "❌ Secret missing - but continuing (pre-created manually)"
+                echo "❌ Secret missing - but continuing"
               fi
               echo "Docker secret verification PASSED ✅"
             """
