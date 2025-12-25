@@ -32,33 +32,41 @@ pipeline {
       }
     }
     
-    stage('Read & Update Version') {
-      when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] } }
-      steps {
-        script {
-          def newVersion
-          if (params.VERSION_BUMP == 'patch') {
-            def patchFile = 'patch_counter.txt'
-            def currentPatch = fileExists(patchFile) ? readFile(patchFile).trim().toInteger() : -1 
-            newVersion = "v1.0.${currentPatch + 1}"
-            writeFile file: patchFile, text: "${currentPatch + 1}"
-          } else if (params.VERSION_BUMP == 'minor') {
-            def minorFile = 'minor_counter.txt'
-            def currentMinor = fileExists(minorFile) ? readFile(minorFile).trim().toInteger() : -1
-            newVersion = "v1.1.${currentMinor + 1}"
-            writeFile file: minorFile, text: "${currentMinor + 1}"
-          } else {
-            def majorFile = 'major_counter.txt'
-            def currentMajor = fileExists(majorFile) ? readFile(majorFile).trim().toInteger() : -1
-            newVersion = "v2.0.${currentMajor + 1}"
-            writeFile file: majorFile, text: "${currentMajor + 1}"
-          }
-          env.IMAGE_TAG = newVersion
-          writeFile file: 'version.txt', text: newVersion
-          echo "${params.VERSION_BUMP} → ${newVersion}"
-        }
+   stage('Read & Update Version') {
+  when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] } }
+  steps {
+    script {
+      def newVersion
+
+      if (params.VERSION_BUMP == 'patch') {
+        def patchFile = 'patch_counter.txt'   //file that keeps track of the patch version c
+         //file doesn't exist initializes counter to -1 (1st version) &set the version to v1.0.0.
+        def currentPatch = fileExists(patchFile) ? readFile(patchFile).trim().toInteger() : -1 
+        newVersion = "v1.0.${currentPatch + 1}"  // reads current version, increments it & set the new version
+        writeFile file: patchFile, text: "${currentPatch + 1}"
+
+      } else if (params.VERSION_BUMP == 'minor') {
+
+        def minorFile = 'minor_counter.txt'
+        def currentMinor = fileExists(minorFile) ? readFile(minorFile).trim().toInteger() : -1
+        newVersion = "v1.1.${currentMinor + 1}"
+        writeFile file: minorFile, text: "${currentMinor + 1}"
+
+      } else if (params.VERSION_BUMP == 'major') {
+
+        def majorFile = 'major_counter.txt'
+        def currentMajor = fileExists(majorFile) ? readFile(majorFile).trim().toInteger() : -1
+        newVersion = "v2.0.${currentMajor + 1}"
+        writeFile file: majorFile, text: "${currentMajor + 1}"
       }
+
+      env.IMAGE_TAG = newVersion
+      writeFile file: 'version.txt', text: newVersion  // Current build version
+      echo "${params.VERSION_BUMP} → ${newVersion}"
     }
+  }
+}
+
 
     stage('Create Namespace') {
       steps {
