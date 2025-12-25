@@ -29,42 +29,114 @@ pipeline {
     stage('Checkout') {
       steps {
         git credentialsId: 'git-creds', url: "${GIT_REPO}", branch: 'master'
-        echo "✅ Checked out code from ${GIT_REPO}"
+      }
+    }
+ stage('Read & Update Version') {
+  when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] } }
+  steps {
+    script {
+      def newVersion
+
+      if (params.VERSION_BUMP == 'patch') {
+        def patchFile = 'patch_counter.txt'   //file that keeps track of the patch version c
+         //file doesn't exist initializes counter to -1 (1st version) &set the version to v1.0.0.
+        def currentPatch = fileExists(patchFile) ? readFile(patchFile).trim().toInteger() : -1 
+        newVersion = "v1.0.${currentPatch + 1}"  // reads current version, increments it & set the new version
+        writeFile file: patchFile, text: "${currentPatch + 1}"
+
+      } else if (params.VERSION_BUMP == 'minor') {
+
+        def minorFile = 'minor_counter.txt'
+        def currentMinor = fileExists(minorFile) ? readFile(minorFile).trim().toInteger() : -1
+        newVersion = "v1.1.${currentMinor + 1}"
+        writeFile file: minorFile, text: "${currentMinor + 1}"
+
+      } else if (params.VERSION_BUMP == 'major') {
+
+        def majorFile = 'major_counter.txt'
+        def currentMajor = fileExists(majorFile) ? readFile(majorFile).trim().toInteger() : -1
+        newVersion = "v2.0.${currentMajor + 1}"
+        writeFile file: majorFile, text: "${currentMajor + 1}"
+      }
+
+      env.IMAGE_TAG = newVersion
+      writeFile file: 'version.txt', text: newVersion  // Current build version
+      echo "${params.VERSION_BUMP} → ${newVersion}"
+    }
+  }
+}
+
+    stage('Create Namespace') {
+      steps {
+        script {
+          sh """
+            kubectl get namespace ${params.ENV} >/dev/null 2>&1 || kubectl create namespace ${params.ENV}
+            echo "Namespace ${params.ENV} ready"
+          """
+        }
       }
     }
 
-    stage('Version Bump') {
-      when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] } }
+    stage('Apply Storage') {
       steps {
         script {
-          def newVersion
-          
-          if (params.VERSION_BUMP == 'patch') {
-            def patchFile = 'patch_counter.txt'
-            def currentPatch = fileExists(patchFile) ? readFile(patchFile).trim().toInteger() : -1 
-            newVersion = "v1.0.${currentPatch + 1}"
-            writeFile file: patchFile, text: "${currentPatch + 1}"
-          } else if (params.VERSION_BUMP == 'minor') {
-            def minorFile = 'minor_counter.txt'
-            def currentMinor = fileExists(minorFile) ? readFile(minorFile).trim().toInteger() : -1
-            newVersion = "v1.${currentMinor + 1}.0"
-            writeFile file: minorFile, text: "${currentMinor + 1}"
-          } else if (params.VERSION_BUMP == 'major') {
-            def majorFile = 'major_counter.txt'
-            def currentMajor = fileExists(majorFile) ? readFile(majorFile).trim().toInteger() : 0
-            newVersion = "v${currentMajor + 1}.0.0"
-            writeFile file: majorFile, text: "${currentMajor + 1}"
-          }
+          def ENV_NS = params.ENV
+          def PV_FILE = "k8s/shared-pv_${ENV_NS}.yaml"
+          def PVC_FILE = "k8s/shared-pvc_${ENV_NS}.yaml"
 
-          env.IMAGE_TAG = newVersion
-          writeFile file: 'version.txt', text: newVersion
-          echo "🎯 ${params.VERSION_BUMP} → ${newVersion}"
+          sh """
+            set -e
+            echo "Applying storage for ${ENV_NS}..."
+            kubectl apply -f k8s/shared-storage-class.yaml || true
+            test -f ${PV_FILE} && kubectl apply -f ${PV_FILE}
+            kubectl get pv shared-pv-${ENV_NS}
+            test -f ${PVC_FILE} && kubectl apply -f ${PVC_FILE}
+            
+            for i in {1..30}; do
+              PHASE=\$(kubectl get pvc shared-pvc -n ${ENV_NS} -o jsonpath='{.status.phase}' 2>/dev/null || echo "Pending")
+              [ "\$PHASE" = "Bound" ] && echo "PVC Bound!" && break
+              echo "PVC: \$PHASE (\$i/30)"
+              sleep 5
+            done
+          """
+        }
+      }
+    }
+
+    stage('Apply Docker Secret') {
+      steps {
+        sh """
+          kubectl apply -f docker-registry-secret.yaml
+          echo "Docker secret applied (dev+qa)"
+        """
+      }
+    }
+
+    stage('Deploy Database') {
+      when { expression { params.ACTION in ['FULL_PIPELINE', 'DATABASE_ONLY'] } }
+      steps {
+        script {
+          sh """
+             set -e
+            echo "Deploying Database for ${params.ENV}..."
+            kubectl apply -f k8s/database-deployment.yaml -n ${params.ENV} || true
+            for i in {1..24}; do
+              READY=\$(kubectl get pod -l app=database -n ${params.ENV} -o jsonpath='{.items[0].status.containerStatuses[0].ready}' 2>/dev/null || echo "false")
+              STATUS=\$(kubectl get pod -l app=database -n ${params.ENV} --no-headers -o custom-columns=STATUS:.status.phase 2>/dev/null || echo "Pending")
+              echo "Database pod status: \$STATUS (ready: \$READY) (\$i/24)"
+              [ "\$READY" = "true" ] && [ "\$STATUS" = "Running" ] && echo "Database is READY!" && break
+              sleep 5
+            done
+            kubectl get svc -l app=database -n ${params.ENV}
+          """
         }
       }
     }
 
     stage('Docker Login') {
-      when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] } }
+      when {
+        expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] }
+      }
       steps {
         withCredentials([
           usernamePassword(
@@ -74,8 +146,8 @@ pipeline {
           )
         ]) {
           sh """
-            echo "\$HARBOR_PASS" | docker login ${REGISTRY} -u "\$HARBOR_USER" --password-stdin
-            echo "✅ Docker login successful"
+            echo "$HARBOR_PASS" | docker login ${REGISTRY} -u "$HARBOR_USER" --password-stdin
+            echo "Docker login successful"
           """
         }
       }
@@ -85,10 +157,13 @@ pipeline {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY'] } }
       steps {
         sh """
-          docker build -t ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG} ./frontend
+          set -e
+          docker build -t frontend:${IMAGE_TAG} ./frontend
+          docker tag frontend:${IMAGE_TAG} ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}
           docker push ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}
-          docker image prune -f
-          echo "✅ Frontend: ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}"
+          docker rmi frontend:${IMAGE_TAG} || true
+          docker image prune -f || true
+          echo "Frontend: ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}"
         """
       }
     }
@@ -97,140 +172,73 @@ pipeline {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'BACKEND_ONLY'] } }
       steps {
         sh """
-          docker build -t ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG} ./backend
+          set -e
+          docker build -t backend:${IMAGE_TAG} ./backend
+          docker tag backend:${IMAGE_TAG} ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}
           docker push ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}
-          docker image prune -f
-          echo "✅ Backend: ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}"
+          docker rmi backend:${IMAGE_TAG} || true
+          docker image prune -f || true
+          echo "Backend: ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}"
         """
       }
     }
 
-    stage('Update Helm Values & Commit') {
+    stage('Update & Commit Helm Values') {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] } }
       steps {
         script {
           sh """
-            echo "🔄 Updating Helm values for ${params.ENV}..."
+            set -e
+            echo "Updating Helm values..."
             sed -i 's|repository:.*|repository: ${REGISTRY}/${PROJECT}/frontend|' frontend-hc/frontendvalues_${params.ENV}.yaml
             sed -i 's|tag:.*|tag: ${IMAGE_TAG}|' frontend-hc/frontendvalues_${params.ENV}.yaml
             sed -i 's|repository:.*|repository: ${REGISTRY}/${PROJECT}/backend|' backend-hc/backendvalues_${params.ENV}.yaml
             sed -i 's|tag:.*|tag: ${IMAGE_TAG}|' backend-hc/backendvalues_${params.ENV}.yaml
-            
-            echo "📝 Helm values updated:"
-            grep -E 'repository|tag' frontend-hc/frontendvalues_${params.ENV}.yaml
-            grep -E 'repository|tag' backend-hc/backendvalues_${params.ENV}.yaml
           """
-          
+
           withCredentials([usernamePassword(credentialsId: 'GitHub', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_TOKEN')]) {
             sh """
               git config user.name "Thanuja"
               git config user.email "ratakondathanuja@gmail.com"
               git add frontend-hc/frontendvalues_${params.ENV}.yaml backend-hc/backendvalues_${params.ENV}.yaml version.txt
-              git commit -m "chore: update images to ${IMAGE_TAG} for ${params.ENV} env" || echo "No changes to commit"
-              git push https://\$GIT_USER:\$GIT_TOKEN@github.com/ThanujaRatakonda/kp_10.git master
-              echo "✅ Pushed to GitHub → ArgoCD will auto-sync!"
+              git commit -m "chore: images ${IMAGE_TAG} for ${params.ENV}" || echo "No changes"
+              git push https://${GIT_USER}:${GIT_TOKEN}@github.com/ThanujaRatakonda/kp_10.git master
             """
           }
         }
       }
     }
 
-    stage('Apply ArgoCD Applications') {
+    stage('Apply ArgoCD Apps') {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'ARGOCD_ONLY', 'DATABASE_ONLY'] } }
       steps {
-        sh """
-          echo "🚀 Applying ArgoCD Applications for ${params.ENV}..."
-          
-          # Apply Docker registry secret IGNORE ERRORS (multi-doc file handles both envs)
-          kubectl apply -f docker-registry-secret.yaml || true
-          
-          # Apply all ArgoCD apps (they auto-create namespaces)
-          kubectl apply -f argocd/backend_${params.ENV}.yaml
-          kubectl apply -f argocd/frontend_${params.ENV}.yaml
-          kubectl apply -f argocd/database-app_${params.ENV}.yaml
-          
-          echo "🔄 Triggering hard refresh..."
-          kubectl annotate application backend-${params.ENV} -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
-          kubectl annotate application frontend-${params.ENV} -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
-          kubectl annotate application database-${params.ENV} -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
-          
-          echo "⏳ Waiting for ArgoCD sync (30s)..."
-          sleep 30
-          
-          echo "📊 ArgoCD Application Status:"
-          kubectl get applications -n argocd | grep ${params.ENV}
-        """
-      }
-    }
-
-    stage('Wait for Deployment') {
-      steps {
-        sh """
-          echo "⏳ Waiting for pods to be ready in ${params.ENV}..."
-          for i in {1..60}; do
-            READY_PODS=\$(kubectl get pods -n ${params.ENV} -o jsonpath='{range .items[*]}{@.metadata.name}{":"}{@.status.containerStatuses[0].ready}{" "}{end}' 2>/dev/null | grep ":true" | wc -l || echo 0)
-            TOTAL_PODS=\$(kubectl get pods -n ${params.ENV} --no-headers 2>/dev/null | wc -l || echo 0)
-            echo "[\$i/60] \$READY_PODS/\$TOTAL_PODS pods ready"
+        script {
+          sh """
+            set -e
+            echo "Applying ArgoCD for ${params.ENV}..."
+            kubectl apply -f argocd/backend_${params.ENV}.yaml
+            kubectl apply -f argocd/frontend_${params.ENV}.yaml
+            kubectl apply -f argocd/database-app_${params.ENV}.yaml
             
-            if [ "\$TOTAL_PODS" -gt 0 ] && [ "\$READY_PODS" = "\$TOTAL_PODS" ]; then
-              echo "✅ All pods READY!"
-              break
-            fi
-            sleep 10
-          done
-        """
+            kubectl annotate application frontend -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
+            kubectl annotate application backend -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
+            kubectl annotate application database -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
+          """
+        }
       }
     }
 
     stage('Verify Deployment') {
       steps {
-        sh """
-          echo "=== 🎉 FINAL DEPLOYMENT STATUS ==="
-          echo "📦 Namespace: ${params.ENV}"
-          
-          echo -e "\\n🐳 PODS:"
-          kubectl get pods -n ${params.ENV} -o wide
-          
-          echo -e "\\n🌐 SERVICES:"
-          kubectl get svc -n ${params.ENV}
-          
-          echo -e "\\n💾 STORAGE:"
-          kubectl get pvc -n ${params.ENV}
-          kubectl get pv | grep ${params.ENV}
-          
-          echo -e "\\n🔗 ARGOCD APPS:"
-          kubectl get applications -n argocd | grep ${params.ENV} -A 3 -B 1
-          
-          echo -e "\\n📋 EVENTS (last 10):"
-          kubectl get events -n ${params.ENV} --sort-by='.lastTimestamp' | tail -10
-          
-          echo -e "\\n✅ Images deployed: ${IMAGE_TAG}"
-        """
+        script {
+          sh """
+            echo "=== FINAL STATUS ==="
+            kubectl get pods -n ${params.ENV}
+            kubectl get svc -n ${params.ENV}
+            kubectl get applications -n argocd
+          """
+        }
       }
-    }
-  }
-  
-  post {
-    always {
-      sh """
-        echo "=== PIPELINE SUMMARY ===
-        ENV: ${params.ENV}
-        ACTION: ${params.ACTION}
-        IMAGE_TAG: ${IMAGE_TAG ?: 'N/A'}"
-        kubectl get pods -n ${params.ENV} -o wide || true
-      """
-    }
-    success {
-      echo "🎉 PIPELINE SUCCESSFUL! Deployment completed for ${params.ENV}"
-    }
-    failure {
-      echo "💥 PIPELINE FAILED!"
-      sh """
-        echo "🔍 Last 15 events in ${params.ENV}:"
-        kubectl get events -n ${params.ENV} --sort-by='.lastTimestamp' | tail -15 || true
-        echo "🔍 ArgoCD app status:"
-        kubectl get applications -n argocd | grep ${params.ENV} || true
-      """
     }
   }
 }
