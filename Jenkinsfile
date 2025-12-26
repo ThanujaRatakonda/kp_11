@@ -81,9 +81,9 @@ stage('Apply Docker Registry Secret') {
   steps {
     script {
       if (params.ENV == 'dev') {
-        sh 'kubectl apply -f  dockersecret_dev.yaml.yaml'
+        sh 'kubectl apply -f  dockersecret_dev.yaml'
       } else {
-        sh 'kubectl apply -f  dockersecret_qa.yaml.yaml'
+        sh 'kubectl apply -f  dockersecret_qa.yaml'
       }
     }
     sh """
