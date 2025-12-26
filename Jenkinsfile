@@ -10,13 +10,13 @@ pipeline {
   parameters {
     choice(
       name: 'ACTION',
-      choices: ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY', 'DATABASE_ONLY', 'ARGOCD_ONLY', 'MULTI_ENV'],
+      choices: ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY', 'DATABASE_ONLY', 'ARGOCD_ONLY'],
       description: 'Run full pipeline or specific components'
     )
     choice(
-      name: 'ENVS',
-      choices: ['dev', 'qa', 'dev-qa'], 
-      description: 'Choose environment(s)'
+      name: 'ENV',
+      choices: ['dev', 'qa', 'both'],
+      description: 'Choose environment (dev/qa/both)'
     )
     choice(
       name: 'VERSION_BUMP',
@@ -33,10 +33,11 @@ pipeline {
     }
     
     stage('Read & Update Version') {
-      when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY', 'MULTI_ENV'] } }
+      when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] } }
       steps {
         script {
           def newVersion
+
           if (params.VERSION_BUMP == 'patch') {
             def patchFile = 'patch_counter.txt'
             def currentPatch = fileExists(patchFile) ? readFile(patchFile).trim().toInteger() : -1 
@@ -47,12 +48,13 @@ pipeline {
             def currentMinor = fileExists(minorFile) ? readFile(minorFile).trim().toInteger() : -1
             newVersion = "v1.1.${currentMinor + 1}"
             writeFile file: minorFile, text: "${currentMinor + 1}"
-          } else {
+          } else if (params.VERSION_BUMP == 'major') {
             def majorFile = 'major_counter.txt'
             def currentMajor = fileExists(majorFile) ? readFile(majorFile).trim().toInteger() : -1
             newVersion = "v2.0.${currentMajor + 1}"
             writeFile file: majorFile, text: "${currentMajor + 1}"
           }
+
           env.IMAGE_TAG = newVersion
           writeFile file: 'version.txt', text: newVersion
           echo "${params.VERSION_BUMP} → ${newVersion}"
@@ -60,31 +62,44 @@ pipeline {
       }
     }
 
-    stage('Create Namespaces') {
-      steps {
-        sh """
-          kubectl get namespace ${params.ENVS == 'dev-qa' ? 'dev qa argocd' : params.ENVS} >/dev/null 2>&1 || \\
-          kubectl create namespace ${params.ENVS == 'dev-qa' ? 'dev qa' : params.ENVS}
-          kubectl get namespace argocd >/dev/null 2>&1 || kubectl create namespace argocd
-          echo "Namespaces: ${params.ENVS} + argocd"
-        """
-      }
-    }
-
-    stage('Apply Docker Registry Secrets') {
+    stage('Create Namespace') {
       steps {
         script {
-          def envs = params.ENVS == 'dev-qa' ? ['dev', 'qa'] : [params.ENVS]
-          for (env in envs) {
+          if (params.ENV == 'both') {
             sh """
-              kubectl apply -f dockersecret_${env}.yaml
-              echo "regcred secret applied to ${env}"
+              kubectl get namespace dev >/dev/null 2>&1 || kubectl create namespace dev
+              kubectl get namespace qa >/dev/null 2>&1 || kubectl create namespace qa
+              kubectl get namespace argocd >/dev/null 2>&1 || kubectl create namespace argocd
+              echo "Namespaces: dev + qa + argocd"
+            """
+          } else {
+            sh """
+              kubectl get namespace ${params.ENV} >/dev/null 2>&1 || kubectl create namespace ${params.ENV}
+              kubectl get namespace argocd >/dev/null 2>&1 || kubectl create namespace argocd
+              echo "Namespaces: ${params.ENV} + argocd"
             """
           }
         }
-        sh """
-          kubectl get secret regcred -n ${params.ENVS == 'dev-qa' ? 'dev qa' : params.ENVS}
-        """
+      }
+    }
+
+    stage('Apply Docker Registry Secret') {
+      steps {
+        script {
+          if (params.ENV == 'both') {
+            parallel([
+              'dev': { sh 'kubectl apply -f dockersecret_dev.yaml'; sh 'kubectl get secret regcred -n dev' },
+              'qa':  { sh 'kubectl apply -f dockersecret_qa.yaml'; sh 'kubectl get secret regcred -n qa' }
+            ])
+          } else {
+            if (params.ENV == 'dev') {
+              sh 'kubectl apply -f dockersecret_dev.yaml'
+            } else {
+              sh 'kubectl apply -f dockersecret_qa.yaml'
+            }
+            sh "kubectl get secret regcred -n ${params.ENV}"
+          }
+        }
       }
     }
 
@@ -92,10 +107,80 @@ pipeline {
       steps {
         timeout(time: 8, unit: 'MINUTES') {
           script {
-            def envs = params.ENVS == 'dev-qa' ? ['dev', 'qa'] : [params.ENVS]
-            for (envName in envs) {
+            if (params.ENV == 'both') {
+              parallel([
+                'dev': {
+                  sh """
+                    ENV_NS="dev"
+                    PV_NAME="shared-pv-\$ENV_NS"
+                    PVC_NAME="shared-pvc"
+                    PVC_STATUS=\$(kubectl get pvc \$PVC_NAME -n \$ENV_NS -o jsonpath='{.status.phase}' 2>/dev/null || echo "None")
+                    if [ "\$PVC_STATUS" = "Bound" ]; then
+                      echo "PVC \$PVC_NAME already BOUND in dev → SKIPPING!"
+                      kubectl get pv \$PV_NAME
+                      kubectl get pvc \$PVC_NAME -n dev
+                      exit 0
+                    fi
+                    echo "PVC not bound, fixing storage for dev..."
+                    kubectl patch pv \$PV_NAME -p '{"spec":{"claimRef":null}}' || true
+                    kubectl delete pvc \$PVC_NAME -n dev --force --grace-period=0 || true
+                    sleep 10
+                    kubectl apply -f k8s/shared-storage-class.yaml || true
+                    kubectl apply -f k8s/shared-pv_dev.yaml || true
+                    sleep 3
+                    kubectl apply -f k8s/shared-pvc_dev.yaml -n dev || true
+                    for i in {1..12}; do
+                      PV_STATUS=\$(kubectl get pv \$PV_NAME -o jsonpath='{.status.phase}' 2>/dev/null || echo "Pending")
+                      echo "PV dev[\$i/12]: \$PV_STATUS"
+                      [ "\$PV_STATUS" = "Available" ] && break || sleep 5
+                    done
+                    for i in {1..30}; do
+                      PHASE=\$(kubectl get pvc \$PVC_NAME -n dev -o jsonpath='{.status.phase}' 2>/dev/null || echo "Pending")
+                      echo "PVC dev[\$i/30]: \$PHASE"
+                      [ "\$PHASE" = "Bound" ] && break || sleep 5
+                    done
+                    kubectl get pv \$PV_NAME
+                    kubectl get pvc \$PVC_NAME -n dev
+                  """
+                },
+                'qa': {
+                  sh """
+                    ENV_NS="qa"
+                    PV_NAME="shared-pv-\$ENV_NS"
+                    PVC_NAME="shared-pvc"
+                    PVC_STATUS=\$(kubectl get pvc \$PVC_NAME -n \$ENV_NS -o jsonpath='{.status.phase}' 2>/dev/null || echo "None")
+                    if [ "\$PVC_STATUS" = "Bound" ]; then
+                      echo "PVC \$PVC_NAME already BOUND in qa → SKIPPING!"
+                      kubectl get pv \$PV_NAME
+                      kubectl get pvc \$PVC_NAME -n qa
+                      exit 0
+                    fi
+                    echo "PVC not bound, fixing storage for qa..."
+                    kubectl patch pv \$PV_NAME -p '{"spec":{"claimRef":null}}' || true
+                    kubectl delete pvc \$PVC_NAME -n qa --force --grace-period=0 || true
+                    sleep 10
+                    kubectl apply -f k8s/shared-storage-class.yaml || true
+                    kubectl apply -f k8s/shared-pv_qa.yaml || true
+                    sleep 3
+                    kubectl apply -f k8s/shared-pvc_qa.yaml -n qa || true
+                    for i in {1..12}; do
+                      PV_STATUS=\$(kubectl get pv \$PV_NAME -o jsonpath='{.status.phase}' 2>/dev/null || echo "Pending")
+                      echo "PV qa[\$i/12]: \$PV_STATUS"
+                      [ "\$PV_STATUS" = "Available" ] && break || sleep 5
+                    done
+                    for i in {1..30}; do
+                      PHASE=\$(kubectl get pvc \$PVC_NAME -n qa -o jsonpath='{.status.phase}' 2>/dev/null || echo "Pending")
+                      echo "PVC qa[\$i/30]: \$PHASE"
+                      [ "\$PHASE" = "Bound" ] && break || sleep 5
+                    done
+                    kubectl get pv \$PV_NAME
+                    kubectl get pvc \$PVC_NAME -n qa
+                  """
+                }
+              ])
+            } else {
               sh """
-                ENV_NS="${envName}"
+                ENV_NS="${params.ENV}"
                 PV_NAME="shared-pv-\$ENV_NS"
                 PVC_NAME="shared-pvc"
                 
@@ -107,10 +192,10 @@ pipeline {
                   exit 0
                 fi
                 
-                echo "PVC not bound, fixing storage for ${envName}..."
+                echo "PVC not bound, fixing storage..."
                 kubectl patch pv \$PV_NAME -p '{"spec":{"claimRef":null}}' || true
                 kubectl delete pvc \$PVC_NAME -n \$ENV_NS --force --grace-period=0 || true
-                sleep 5
+                sleep 10
                 
                 kubectl apply -f k8s/shared-storage-class.yaml || true
                 kubectl apply -f k8s/shared-pv_\${ENV_NS}.yaml || true
@@ -139,14 +224,10 @@ pipeline {
     }
 
     stage('Docker Login') {
-      when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY', 'MULTI_ENV'] } }
+      when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] } }
       steps {
         withCredentials([
-          usernamePassword(
-            credentialsId: 'harbor-creds',
-            usernameVariable: 'HARBOR_USER',
-            passwordVariable: 'HARBOR_PASS'
-          )
+          usernamePassword(credentialsId: 'harbor-creds', usernameVariable: 'HARBOR_USER', passwordVariable: 'HARBOR_PASS')
         ]) {
           sh """
             echo "$HARBOR_PASS" | docker login ${REGISTRY} -u "$HARBOR_USER" --password-stdin
@@ -157,7 +238,7 @@ pipeline {
     }
 
     stage('Build & Push Frontend') {
-      when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'MULTI_ENV'] } }
+      when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY'] } }
       steps {
         sh """
           set -e
@@ -172,7 +253,7 @@ pipeline {
     }
 
     stage('Build & Push Backend') {
-      when { expression { params.ACTION in ['FULL_PIPELINE', 'BACKEND_ONLY', 'MULTI_ENV'] } }
+      when { expression { params.ACTION in ['FULL_PIPELINE', 'BACKEND_ONLY'] } }
       steps {
         sh """
           set -e
@@ -187,27 +268,40 @@ pipeline {
     }
 
     stage('Update & Commit Helm Values') {
-      when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY', 'MULTI_ENV'] } }
+      when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] } }
       steps {
         script {
-          def envs = params.ENVS == 'dev-qa' ? ['dev', 'qa'] : [params.ENVS]
-          for (envName in envs) {
+          if (params.ENV == 'both') {
             sh """
               set -e
-              echo "Updating Helm values for ${envName}..."
-              sed -i 's|repository:.*|repository: ${REGISTRY}/${PROJECT}/frontend|' frontend-hc/frontendvalues_${envName}.yaml
-              sed -i 's|tag:.*|tag: ${IMAGE_TAG}|' frontend-hc/frontendvalues_${envName}.yaml
-              sed -i 's|repository:.*|repository: ${REGISTRY}/${PROJECT}/backend|' backend-hc/backendvalues_${envName}.yaml
-              sed -i 's|tag:.*|tag: ${IMAGE_TAG}|' backend-hc/backendvalues_${envName}.yaml
+              echo "Updating Helm values for both dev+qa..."
+              sed -i 's|repository:.*|repository: ${REGISTRY}/${PROJECT}/frontend|' frontend-hc/frontendvalues_dev.yaml
+              sed -i 's|tag:.*|tag: ${IMAGE_TAG}|' frontend-hc/frontendvalues_dev.yaml
+              sed -i 's|repository:.*|repository: ${REGISTRY}/${PROJECT}/frontend|' frontend-hc/frontendvalues_qa.yaml
+              sed -i 's|tag:.*|tag: ${IMAGE_TAG}|' frontend-hc/frontendvalues_qa.yaml
+              sed -i 's|repository:.*|repository: ${REGISTRY}/${PROJECT}/backend|' backend-hc/backendvalues_dev.yaml
+              sed -i 's|tag:.*|tag: ${IMAGE_TAG}|' backend-hc/backendvalues_dev.yaml
+              sed -i 's|repository:.*|repository: ${REGISTRY}/${PROJECT}/backend|' backend-hc/backendvalues_qa.yaml
+              sed -i 's|tag:.*|tag: ${IMAGE_TAG}|' backend-hc/backendvalues_qa.yaml
+            """
+          } else {
+            sh """
+              set -e
+              echo "Updating Helm values..."
+              sed -i 's|repository:.*|repository: ${REGISTRY}/${PROJECT}/frontend|' frontend-hc/frontendvalues_${params.ENV}.yaml
+              sed -i 's|tag:.*|tag: ${IMAGE_TAG}|' frontend-hc/frontendvalues_${params.ENV}.yaml
+              sed -i 's|repository:.*|repository: ${REGISTRY}/${PROJECT}/backend|' backend-hc/backendvalues_${params.ENV}.yaml
+              sed -i 's|tag:.*|tag: ${IMAGE_TAG}|' backend-hc/backendvalues_${params.ENV}.yaml
             """
           }
 
           withCredentials([usernamePassword(credentialsId: 'GitHub', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_TOKEN')]) {
+            def commitMsg = params.ENV == 'both' ? "chore: images ${IMAGE_TAG} for dev+qa" : "chore: images ${IMAGE_TAG} for ${params.ENV}"
             sh """
               git config user.name "Thanuja"
               git config user.email "ratakondathanuja@gmail.com"
-              git add frontend-hc/frontendvalues_*.yaml backend-hc/backendvalues_*.yaml version.txt
-              git commit -m "chore: images ${IMAGE_TAG} for ${params.ENVS}" || echo "No changes"
+              git add frontend-hc/frontendvalues_*.yaml backend-hc/backendvalues_*.yaml version.txt || true
+              git commit -m "${commitMsg}" || echo "No changes"
               git push https://${GIT_USER}:${GIT_TOKEN}@github.com/ThanujaRatakonda/kp_11.git master
             """
           }
@@ -216,44 +310,69 @@ pipeline {
     }
 
     stage('Apply ArgoCD Apps') {
-      when { expression { params.ACTION in ['FULL_PIPELINE', 'ARGOCD_ONLY', 'DATABASE_ONLY', 'MULTI_ENV'] } }
+      when { expression { params.ACTION in ['FULL_PIPELINE', 'ARGOCD_ONLY', 'DATABASE_ONLY'] } }
       steps {
         script {
-          def envs = params.ENVS == 'dev-qa' ? ['dev', 'qa'] : [params.ENVS]
-          for (envName in envs) {
-              kubectl apply -f argocd/backend_${envName}.yaml
-              kubectl apply -f argocd/frontend_${envName}.yaml
-              kubectl apply -f argocd/database-app_${envName}.yaml
+          if (params.ENV == 'both') {
+            parallel([
+              'dev': {
+                sh """
+                  kubectl apply -f argocd/backend_dev.yaml
+                  kubectl apply -f argocd/frontend_dev.yaml
+                  kubectl apply -f argocd/database-app_dev.yaml
+                  kubectl annotate application backend -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
+                  kubectl annotate application frontend -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
+                  kubectl annotate application database -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
+                  echo "ArgoCD dev refreshed"
+                """
+              },
+              'qa': {
+                sh """
+                  kubectl apply -f argocd/backend_qa.yaml
+                  kubectl apply -f argocd/frontend_qa.yaml
+                  kubectl apply -f argocd/database-app_qa.yaml
+                  kubectl annotate application backend -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
+                  kubectl annotate application frontend -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
+                  kubectl annotate application database -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
+                  echo "ArgoCD qa refreshed"
+                """
+              }
+            ])
+          } else {
+            sh """
+              kubectl apply -f argocd/backend_${params.ENV}.yaml
+              kubectl apply -f argocd/frontend_${params.ENV}.yaml
+              kubectl apply -f argocd/database-app_${params.ENV}.yaml
               
               kubectl annotate application backend -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
               kubectl annotate application frontend -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
               kubectl annotate application database -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
-              echo " ${envName} ArgoCD refreshed"
+              echo "ArgoCD ${params.ENV} refreshed"
             """
-            sleep 10
           }
         }
-        sh """
-          echo " ArgoCD refreshed for ${params.ENVS}"
-        """
       }
     }
 
-    stage('Verify All Deployments') {
+    stage('Verify Deployment') {
       steps {
-        timeout(time: 5, unit: 'MINUTES') {
-          sh """
-
-            kubectl get pods -n ${params.ENVS == 'dev-qa' ? 'dev qa' : params.ENVS} -o wide
-            
-            kubectl get svc -n ${params.ENVS == 'dev-qa' ? 'dev qa' : params.ENVS}
-            
-            kubectl get applications -n argocd -o custom-columns="NAME:.metadata.name,SYNC:.status.sync.status,HEALTH:.status.health.status" | grep -E "(backend|frontend|database)"
-            
-            kubectl get secret regcred -n ${params.ENVS == 'dev-qa' ? 'dev qa' : params.ENVS}
-            
-            kubectl get events -n ${params.ENVS == 'dev-qa' ? 'dev qa' : params.ENVS} --sort-by='.lastTimestamp' | tail -10
-          """
+        script {
+          if (params.ENV == 'both') {
+            sh """
+              echo "=== DEV Status ==="
+              kubectl get pods -n dev
+              kubectl get svc -n dev
+              echo "=== QA Status ==="
+              kubectl get pods -n qa
+              kubectl get svc -n qa
+            """
+          } else {
+            sh """
+              kubectl get pods -n ${params.ENV}
+              kubectl get svc -n ${params.ENV}
+            """
+          }
+          sh "kubectl get applications -n argocd | grep -E '(backend|frontend|database)'"
         }
       }
     }
