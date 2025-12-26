@@ -79,9 +79,9 @@ pipeline {
     }
     stage('Apply Docker Registry Secret') {
   steps {
-    sh """
-      kubectl apply -f docker-registry-secret.yaml
-      kubectl get secret regcred -n ${params.ENV}
+    sh """ 
+    kubectl apply -f docker-registry-secret.yaml -n ${params.ENV} --dry-run=client -o yaml | kubectl apply -f -
+      kubectl get secret regcred -n ${params.ENV} -o wide
     """
   }
 }
