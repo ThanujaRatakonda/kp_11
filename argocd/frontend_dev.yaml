@@ -1,7 +1,7 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: frontend
+  name: frontend-dev
   namespace: argocd
   annotations:
     argocd.argoproj.io/sync-options: CreateNamespace=true
@@ -10,7 +10,7 @@ spec:
   project: default
 
   source:
-    repoURL: https://github.com/ThanujaRatakonda/kp_10
+    repoURL: https://github.com/ThanujaRatakonda/kp_11
     targetRevision: master
     path: frontend-hc
     helm:
