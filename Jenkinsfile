@@ -77,6 +77,15 @@ pipeline {
         """
       }
     }
+    stage('Apply Docker Registry Secret') {
+  steps {
+    sh """
+      kubectl apply -f docker-registry-secret.yaml
+      kubectl get secret regcred -n ${params.ENV}
+    """
+  }
+}
+
 stage('Apply Storage') {
   steps {
     timeout(time: 8, unit: 'MINUTES') {
