@@ -3,8 +3,8 @@ pipeline {
 
   environment {
     REGISTRY = "10.131.103.92:8090"
-    PROJECT  = "kp_10"
-    GIT_REPO = "https://github.com/ThanujaRatakonda/kp_10.git"
+    PROJECT  = "kp_11"
+    GIT_REPO = "https://github.com/ThanujaRatakonda/kp_11.git"
   }
 
   parameters {
@@ -208,7 +208,7 @@ stage('Update & Commit Helm Values') {
               git config user.email "ratakondathanuja@gmail.com"
               git add frontend-hc/frontendvalues_${params.ENV}.yaml backend-hc/backendvalues_${params.ENV}.yaml version.txt
               git commit -m "chore: images ${IMAGE_TAG} for ${params.ENV}" || echo "No changes"
-              git push https://${GIT_USER}:${GIT_TOKEN}@github.com/ThanujaRatakonda/kp_10.git master
+              git push https://${GIT_USER}:${GIT_TOKEN}@github.com/ThanujaRatakonda/kp_11.git master
             """
           }
         }
