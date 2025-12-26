@@ -79,17 +79,40 @@ pipeline {
     }
 
    stage('Apply Storage') {
-  sh """
-    ENV_NS="${params.ENV}"
-    # FIX BOTH dev+qa (not just qa!)
-    kubectl patch pv shared-pv-\$ENV_NS -p '{"spec":{"claimRef":null}}' || true
-    kubectl delete pvc shared-pvc -n \$ENV_NS --ignore-not-found=true || true
-    sleep 5
-    
-    kubectl apply -f k8s/shared-pv_\${ENV_NS}.yaml || true
-    kubectl apply -f k8s/shared-pvc_\${ENV_NS}.yaml -n \$ENV_NS || true
-    # ... rest unchanged
-  """
+  steps {
+    timeout(time: 8, unit: 'MINUTES') {
+      sh """
+        ENV_NS="${params.ENV}"
+        # FIX BOTH dev+qa (not just qa!)
+        kubectl patch pv shared-pv-\$ENV_NS -p '{"spec":{"claimRef":null}}' || true
+        kubectl delete pvc shared-pvc -n \$ENV_NS --ignore-not-found=true || true
+        sleep 5
+        
+        kubectl apply -f k8s/shared-storage-class.yaml || true
+        kubectl apply -f k8s/shared-pv_\${ENV_NS}.yaml || true
+        sleep 3
+        kubectl apply -f k8s/shared-pvc_\${ENV_NS}.yaml -n \$ENV_NS || true
+        
+        # Wait PV Available
+        for i in {1..12}; do
+          PV_STATUS=\$(kubectl get pv shared-pv-\$ENV_NS -o jsonpath='{.status.phase}' 2>/dev/null || echo "Pending")
+          echo "PV[\$i/12]: \$PV_STATUS"
+          [ "\$PV_STATUS" = "Available" ] && break || sleep 5
+        done
+        
+        # Wait PVC Bound
+        for i in {1..30}; do
+          PHASE=\$(kubectl get pvc shared-pvc -n \$ENV_NS -o jsonpath='{.status.phase}' 2>/dev/null || echo "Pending")
+          echo "PVC[\$i/30]: \$PHASE"
+          [ "\$PHASE" = "Bound" ] && echo " PVC BOUND!" && break || sleep 5
+        done
+        
+        kubectl get pv shared-pv-\$ENV_NS
+        kubectl get pvc shared-pvc -n \$ENV_NS
+        echo "STORAGE PERFECT!"
+      """
+    }
+  } 
 }
 
    stage('Docker Login') {
