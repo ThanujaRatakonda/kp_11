@@ -10,13 +10,13 @@ pipeline {
   parameters {
     choice(
       name: 'ACTION',
-      choices: ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY', 'DATABASE_ONLY', 'ARGOCD_ONLY'],
+      choices: ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY', 'DATABASE_ONLY', 'ARGOCD_ONLY', 'MULTI_ENV'],
       description: 'Run full pipeline or specific components'
     )
     choice(
-      name: 'ENV',
-      choices: ['dev', 'qa'],
-      description: 'Choose environment (dev/qa)'
+      name: 'ENVS',
+      choices: ['dev', 'qa', 'dev-qa'], 
+      description: 'Choose environment(s)'
     )
     choice(
       name: 'VERSION_BUMP',
@@ -32,118 +32,114 @@ pipeline {
       }
     }
     
-   stage('Read & Update Version') {
-  when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] } }
-  steps {
-    script {
-      def newVersion
-
-      if (params.VERSION_BUMP == 'patch') {
-        def patchFile = 'patch_counter.txt'   //file that keeps track of the patch version c
-         //file doesn't exist initializes counter to -1 (1st version) &set the version to v1.0.0.
-        def currentPatch = fileExists(patchFile) ? readFile(patchFile).trim().toInteger() : -1 
-        newVersion = "v1.0.${currentPatch + 1}"  // reads current version, increments it & set the new version
-        writeFile file: patchFile, text: "${currentPatch + 1}"
-
-      } else if (params.VERSION_BUMP == 'minor') {
-
-        def minorFile = 'minor_counter.txt'
-        def currentMinor = fileExists(minorFile) ? readFile(minorFile).trim().toInteger() : -1
-        newVersion = "v1.1.${currentMinor + 1}"
-        writeFile file: minorFile, text: "${currentMinor + 1}"
-
-      } else if (params.VERSION_BUMP == 'major') {
-
-        def majorFile = 'major_counter.txt'
-        def currentMajor = fileExists(majorFile) ? readFile(majorFile).trim().toInteger() : -1
-        newVersion = "v2.0.${currentMajor + 1}"
-        writeFile file: majorFile, text: "${currentMajor + 1}"
+    stage('Read & Update Version') {
+      when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY', 'MULTI_ENV'] } }
+      steps {
+        script {
+          def newVersion
+          if (params.VERSION_BUMP == 'patch') {
+            def patchFile = 'patch_counter.txt'
+            def currentPatch = fileExists(patchFile) ? readFile(patchFile).trim().toInteger() : -1 
+            newVersion = "v1.0.${currentPatch + 1}"
+            writeFile file: patchFile, text: "${currentPatch + 1}"
+          } else if (params.VERSION_BUMP == 'minor') {
+            def minorFile = 'minor_counter.txt'
+            def currentMinor = fileExists(minorFile) ? readFile(minorFile).trim().toInteger() : -1
+            newVersion = "v1.1.${currentMinor + 1}"
+            writeFile file: minorFile, text: "${currentMinor + 1}"
+          } else {
+            def majorFile = 'major_counter.txt'
+            def currentMajor = fileExists(majorFile) ? readFile(majorFile).trim().toInteger() : -1
+            newVersion = "v2.0.${currentMajor + 1}"
+            writeFile file: majorFile, text: "${currentMajor + 1}"
+          }
+          env.IMAGE_TAG = newVersion
+          writeFile file: 'version.txt', text: newVersion
+          echo "${params.VERSION_BUMP} → ${newVersion}"
+        }
       }
-
-      env.IMAGE_TAG = newVersion
-      writeFile file: 'version.txt', text: newVersion  // Current build version
-      echo "${params.VERSION_BUMP} → ${newVersion}"
     }
-  }
-}
 
-
-    stage('Create Namespace') {
+    stage('Create Namespaces') {
       steps {
         sh """
-          kubectl get namespace ${params.ENV} >/dev/null 2>&1 || kubectl create namespace ${params.ENV}
+          kubectl get namespace ${params.ENVS == 'dev-qa' ? 'dev qa argocd' : params.ENVS} >/dev/null 2>&1 || \\
+          kubectl create namespace ${params.ENVS == 'dev-qa' ? 'dev qa' : params.ENVS}
           kubectl get namespace argocd >/dev/null 2>&1 || kubectl create namespace argocd
-          echo " Namespaces: ${params.ENV} + argocd"
+          echo "Namespaces: ${params.ENVS} + argocd"
         """
       }
     }
-stage('Apply Docker Registry Secret') {
-  steps {
-    script {
-      if (params.ENV == 'dev') {
-        sh 'kubectl apply -f  dockersecret_dev.yaml'
-      } else {
-        sh 'kubectl apply -f  dockersecret_qa.yaml'
+
+    stage('Apply Docker Registry Secrets') {
+      steps {
+        script {
+          def envs = params.ENVS == 'dev-qa' ? ['dev', 'qa'] : [params.ENVS]
+          for (env in envs) {
+            sh """
+              kubectl apply -f dockersecret_${env}.yaml
+              echo "regcred secret applied to ${env}"
+            """
+          }
+        }
+        sh """
+          kubectl get secret regcred -n ${params.ENVS == 'dev-qa' ? 'dev qa' : params.ENVS}
+        """
       }
     }
-    sh """
-      kubectl get secret regcred -n ${params.ENV}
-    """
-  }
-}
 
-
-stage('Apply Storage') {
-  steps {
-    timeout(time: 8, unit: 'MINUTES') {
-      sh """
-        ENV_NS="${params.ENV}"
-        PV_NAME="shared-pv-\$ENV_NS"
-        PVC_NAME="shared-pvc"
-        
-        PVC_STATUS=\$(kubectl get pvc \$PVC_NAME -n \$ENV_NS -o jsonpath='{.status.phase}' 2>/dev/null || echo "None")
-        if [ "\$PVC_STATUS" = "Bound" ]; then
-          echo " PVC \$PVC_NAME already BOUND in \$ENV_NS → SKIPPING!"
-          kubectl get pv \$PV_NAME
-          kubectl get pvc \$PVC_NAME -n \$ENV_NS
-          exit 0
-        fi
-        
-        echo "PVC not bound, fixing storage..."
-        kubectl patch pv \$PV_NAME -p '{"spec":{"claimRef":null}}' || true
-        kubectl delete pvc \$PVC_NAME -n \$ENV_NS --force --grace-period=0 || true
-        sleep 10
-        
-        kubectl apply -f k8s/shared-storage-class.yaml || true
-        kubectl apply -f k8s/shared-pv_\${ENV_NS}.yaml || true
-        sleep 3
-        kubectl apply -f k8s/shared-pvc_\${ENV_NS}.yaml -n \$ENV_NS || true
-        
-        # Wait loops...
-        for i in {1..12}; do
-          PV_STATUS=\$(kubectl get pv \$PV_NAME -o jsonpath='{.status.phase}' 2>/dev/null || echo "Pending")
-          echo "PV[\$i/12]: \$PV_STATUS"
-          [ "\$PV_STATUS" = "Available" ] && break || sleep 5
-        done
-        
-        for i in {1..30}; do
-          PHASE=\$(kubectl get pvc \$PVC_NAME -n \$ENV_NS -o jsonpath='{.status.phase}' 2>/dev/null || echo "Pending")
-          echo "PVC[\$i/30]: \$PHASE"
-          [ "\$PHASE" = "Bound" ] && break || sleep 5
-        done
-        
-        kubectl get pv \$PV_NAME
-        kubectl get pvc \$PVC_NAME -n \$ENV_NS
-
-      """
-    }
-  }
-}
-
- stage('Docker Login') {
-      when {
-        expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] }
+    stage('Apply Storage') {
+      steps {
+        timeout(time: 8, unit: 'MINUTES') {
+          script {
+            def envs = params.ENVS == 'dev-qa' ? ['dev', 'qa'] : [params.ENVS]
+            for (envName in envs) {
+              sh """
+                ENV_NS="${envName}"
+                PV_NAME="shared-pv-\$ENV_NS"
+                PVC_NAME="shared-pvc"
+                
+                PVC_STATUS=\$(kubectl get pvc \$PVC_NAME -n \$ENV_NS -o jsonpath='{.status.phase}' 2>/dev/null || echo "None")
+                if [ "\$PVC_STATUS" = "Bound" ]; then
+                  echo " PVC \$PVC_NAME already BOUND in \$ENV_NS → SKIPPING!"
+                  kubectl get pv \$PV_NAME
+                  kubectl get pvc \$PVC_NAME -n \$ENV_NS
+                  exit 0
+                fi
+                
+                echo "PVC not bound, fixing storage for ${envName}..."
+                kubectl patch pv \$PV_NAME -p '{"spec":{"claimRef":null}}' || true
+                kubectl delete pvc \$PVC_NAME -n \$ENV_NS --force --grace-period=0 || true
+                sleep 5
+                
+                kubectl apply -f k8s/shared-storage-class.yaml || true
+                kubectl apply -f k8s/shared-pv_\${ENV_NS}.yaml || true
+                sleep 3
+                kubectl apply -f k8s/shared-pvc_\${ENV_NS}.yaml -n \$ENV_NS || true
+                
+                for i in {1..12}; do
+                  PV_STATUS=\$(kubectl get pv \$PV_NAME -o jsonpath='{.status.phase}' 2>/dev/null || echo "Pending")
+                  echo "PV[\$i/12]: \$PV_STATUS"
+                  [ "\$PV_STATUS" = "Available" ] && break || sleep 5
+                done
+                
+                for i in {1..30}; do
+                  PHASE=\$(kubectl get pvc \$PVC_NAME -n \$ENV_NS -o jsonpath='{.status.phase}' 2>/dev/null || echo "Pending")
+                  echo "PVC[\$i/30]: \$PHASE"
+                  [ "\$PHASE" = "Bound" ] && break || sleep 5
+                done
+                
+                kubectl get pv \$PV_NAME
+                kubectl get pvc \$PVC_NAME -n \$ENV_NS
+              """
+            }
+          }
+        }
       }
+    }
+
+    stage('Docker Login') {
+      when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY', 'MULTI_ENV'] } }
       steps {
         withCredentials([
           usernamePassword(
@@ -161,7 +157,7 @@ stage('Apply Storage') {
     }
 
     stage('Build & Push Frontend') {
-      when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY'] } }
+      when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'MULTI_ENV'] } }
       steps {
         sh """
           set -e
@@ -176,7 +172,7 @@ stage('Apply Storage') {
     }
 
     stage('Build & Push Backend') {
-      when { expression { params.ACTION in ['FULL_PIPELINE', 'BACKEND_ONLY'] } }
+      when { expression { params.ACTION in ['FULL_PIPELINE', 'BACKEND_ONLY', 'MULTI_ENV'] } }
       steps {
         sh """
           set -e
@@ -189,25 +185,29 @@ stage('Apply Storage') {
         """
       }
     }
-stage('Update & Commit Helm Values') {
-      when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] } }
+
+    stage('Update & Commit Helm Values') {
+      when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY', 'MULTI_ENV'] } }
       steps {
         script {
-          sh """
-            set -e
-            echo "Updating Helm values..."
-            sed -i 's|repository:.*|repository: ${REGISTRY}/${PROJECT}/frontend|' frontend-hc/frontendvalues_${params.ENV}.yaml
-            sed -i 's|tag:.*|tag: ${IMAGE_TAG}|' frontend-hc/frontendvalues_${params.ENV}.yaml
-            sed -i 's|repository:.*|repository: ${REGISTRY}/${PROJECT}/backend|' backend-hc/backendvalues_${params.ENV}.yaml
-            sed -i 's|tag:.*|tag: ${IMAGE_TAG}|' backend-hc/backendvalues_${params.ENV}.yaml
-          """
+          def envs = params.ENVS == 'dev-qa' ? ['dev', 'qa'] : [params.ENVS]
+          for (envName in envs) {
+            sh """
+              set -e
+              echo "Updating Helm values for ${envName}..."
+              sed -i 's|repository:.*|repository: ${REGISTRY}/${PROJECT}/frontend|' frontend-hc/frontendvalues_${envName}.yaml
+              sed -i 's|tag:.*|tag: ${IMAGE_TAG}|' frontend-hc/frontendvalues_${envName}.yaml
+              sed -i 's|repository:.*|repository: ${REGISTRY}/${PROJECT}/backend|' backend-hc/backendvalues_${envName}.yaml
+              sed -i 's|tag:.*|tag: ${IMAGE_TAG}|' backend-hc/backendvalues_${envName}.yaml
+            """
+          }
 
           withCredentials([usernamePassword(credentialsId: 'GitHub', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_TOKEN')]) {
             sh """
               git config user.name "Thanuja"
               git config user.email "ratakondathanuja@gmail.com"
-              git add frontend-hc/frontendvalues_${params.ENV}.yaml backend-hc/backendvalues_${params.ENV}.yaml version.txt
-              git commit -m "chore: images ${IMAGE_TAG} for ${params.ENV}" || echo "No changes"
+              git add frontend-hc/frontendvalues_*.yaml backend-hc/backendvalues_*.yaml version.txt
+              git commit -m "chore: images ${IMAGE_TAG} for ${params.ENVS}" || echo "No changes"
               git push https://${GIT_USER}:${GIT_TOKEN}@github.com/ThanujaRatakonda/kp_11.git master
             """
           }
@@ -216,28 +216,45 @@ stage('Update & Commit Helm Values') {
     }
 
     stage('Apply ArgoCD Apps') {
-      when { expression { params.ACTION in ['FULL_PIPELINE', 'ARGOCD_ONLY', 'DATABASE_ONLY'] } }
+      when { expression { params.ACTION in ['FULL_PIPELINE', 'ARGOCD_ONLY', 'DATABASE_ONLY', 'MULTI_ENV'] } }
       steps {
+        script {
+          def envs = params.ENVS == 'dev-qa' ? ['dev', 'qa'] : [params.ENVS]
+          for (envName in envs) {
+              kubectl apply -f argocd/backend_${envName}.yaml
+              kubectl apply -f argocd/frontend_${envName}.yaml
+              kubectl apply -f argocd/database-app_${envName}.yaml
+              
+              kubectl annotate application backend -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
+              kubectl annotate application frontend -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
+              kubectl annotate application database -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
+              echo " ${envName} ArgoCD refreshed"
+            """
+            sleep 10
+          }
+        }
         sh """
-          kubectl apply -f argocd/backend_${params.ENV}.yaml
-          kubectl apply -f argocd/frontend_${params.ENV}.yaml
-          kubectl apply -f argocd/database-app_${params.ENV}.yaml
-          
-          kubectl annotate application backend -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
-          kubectl annotate application frontend -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
-          kubectl annotate application database -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
-          echo " ArgoCD refreshed"
+          echo " ArgoCD refreshed for ${params.ENVS}"
         """
       }
     }
 
-    stage('Verify Deployment') {
+    stage('Verify All Deployments') {
       steps {
-        sh """
-          kubectl get pods -n ${params.ENV}
-          kubectl get svc -n ${params.ENV}
-          kubectl get applications -n argocd | grep -E "(backend|frontend|database)"
-        """
+        timeout(time: 5, unit: 'MINUTES') {
+          sh """
+
+            kubectl get pods -n ${params.ENVS == 'dev-qa' ? 'dev qa' : params.ENVS} -o wide
+            
+            kubectl get svc -n ${params.ENVS == 'dev-qa' ? 'dev qa' : params.ENVS}
+            
+            kubectl get applications -n argocd -o custom-columns="NAME:.metadata.name,SYNC:.status.sync.status,HEALTH:.status.health.status" | grep -E "(backend|frontend|database)"
+            
+            kubectl get secret regcred -n ${params.ENVS == 'dev-qa' ? 'dev qa' : params.ENVS}
+            
+            kubectl get events -n ${params.ENVS == 'dev-qa' ? 'dev qa' : params.ENVS} --sort-by='.lastTimestamp' | tail -10
+          """
+        }
       }
     }
   }
