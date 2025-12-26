@@ -5,10 +5,10 @@ namespace: dev
 replicaCount: 1
 
 image:
-  repository: 10.131.103.92:8090/kp_10/backend
+  repository: 10.131.103.92:8090/kp_11/backend
   pullPolicy: Always
   # Overrides the image tag whose default is the chart appVersion.
-  tag: v1.0.28
+  tag: v1.0.8
 
 imagePullSecrets:
   - name: regcred
