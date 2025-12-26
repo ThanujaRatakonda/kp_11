@@ -83,10 +83,10 @@ stage('Apply Storage') {
       sh """
         ENV_NS="${params.ENV}"
         kubectl patch pv shared-pv-\$ENV_NS -p '{"spec":{"claimRef":null}}' || true
-        kubectl delete pvc shared-pvc -n \$ENV_NS --ignore-not-found=true || true
-        sleep 5
         
-        # Apply fresh
+        kubectl delete pvc shared-pvc -n \$ENV_NS --force --grace-period=0 --ignore-not-found=true || true
+        sleep 10  # Wait for PVC fully gone
+        
         kubectl apply -f k8s/shared-storage-class.yaml || true
         kubectl apply -f k8s/shared-pv_\${ENV_NS}.yaml || true
         sleep 3
@@ -101,7 +101,7 @@ stage('Apply Storage') {
         for i in {1..30}; do
           PHASE=\$(kubectl get pvc shared-pvc -n \$ENV_NS -o jsonpath='{.status.phase}' 2>/dev/null || echo "Pending")
           echo "PVC[\$i/30]: \$PHASE"
-          [ "\$PHASE" = "Bound" ] && echo " PVC BOUND!" && break || sleep 5
+          [ "\$PHASE" = "Bound" ] && echo "PVC BOUND!" && break || sleep 5
         done
         
         kubectl get pv shared-pv-\$ENV_NS
@@ -110,6 +110,7 @@ stage('Apply Storage') {
     }
   }
 }
+
 
    stage('Docker Login') {
   when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] } }
