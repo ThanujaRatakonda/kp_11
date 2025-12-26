@@ -77,14 +77,16 @@ pipeline {
         """
       }
     }
-   stage('Apply Docker Registry Secret') {
+stage('Apply Docker Registry Secret') {
   steps {
+    script {
+      if (params.ENV == 'dev') {
+        sh 'kubectl apply -f  dockersecret_dev.yaml.yaml'
+      } else {
+        sh 'kubectl apply -f  dockersecret_qa.yaml.yaml'
+      }
+    }
     sh """
-      if [ "${params.ENV}" = "dev" ]; then
-        head -15 docker-registry-secret.yaml | kubectl apply -f -
-      else
-        tail -15 docker-registry-secret.yaml | kubectl apply -f -
-      fi
       kubectl get secret regcred -n ${params.ENV}
     """
   }
